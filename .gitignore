@@ -1,0 +1,40 @@
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+**/credentials.json
+**/token.json
+**/*service-account*.json
+
+# Node.js dependencies and builds
+**/node_modules/
+**/dist/
+**/dist-ssr/
+**/coverage/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Python
+**/venv/
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+
+# Uploaded and generated files
+**/uploads/
+**/temp/
+**/tmp/
+
+# Logs
+*.log
+logs/
+
+# Editors and operating system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
