@@ -1,809 +1,250 @@
+
 import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
-const BACKEND_URL = "http://localhost:5000";
+const API_URL = "http://localhost:5000";
 
-const questionTypeFields = [
-    {
-        key: "mcq",
-        label: "Multiple Choice Questions (MCQ)"
-    },
-    {
-        key: "trueFalse",
-        label: "True / False"
-    },
-    {
-        key: "fillBlank",
-        label: "Fill in the Blanks"
-    },
-    {
-        key: "shortAnswer",
-        label: "Short Factual Answer"
-    }
+const typeFields = [
+    ["mcq_count", "Regular MCQ"],
+    ["true_false_count", "True / False"],
+    ["statement_mcq_count", "Statement MCQ"],
+    ["fill_blank_count", "Fill in the Blank"],
+    ["short_answer_count", "Short Answer"]
 ];
 
 const bloomFields = [
-    {
-        key: "remember",
-        label: "Remember"
-    },
-    {
-        key: "understand",
-        label: "Understand"
-    },
-    {
-        key: "apply",
-        label: "Apply"
-    },
-    {
-        key: "analyze",
-        label: "Analyze"
-    },
-    {
-        key: "evaluate",
-        label: "Evaluate"
-    },
-    {
-        key: "create",
-        label: "Create"
-    }
+    ["remember_count", "Remember"],
+    ["understand_count", "Understand"],
+    ["apply_count", "Apply"],
+    ["analyze_count", "Analyze"],
+    ["evaluate_count", "Evaluate"],
+    ["create_count", "Create"]
 ];
 
-function GenerateQuestions() {
-
-    const [file, setFile] = useState(null);
-
-    const [difficulty, setDifficulty] =
-        useState("Medium");
-
-    const [counts, setCounts] = useState({
-
-        mcq: 0,
-
-        trueFalse: 0,
-
-        fillBlank: 0,
-
-        shortAnswer: 0
-    });
-
-    const [bloomCounts, setBloomCounts] = useState({
-
-        remember: 0,
-
-        understand: 0,
-
-        apply: 0,
-
-        analyze: 0,
-
-        evaluate: 0,
-
-        create: 0
-    });
-
-    const [questions, setQuestions] =
-        useState([]);
-
-    const [loading, setLoading] =
-        useState(false);
-
-    const [error, setError] =
-        useState("");
-
-    const [success, setSuccess] =
-        useState("");
-
-    // ======================================
-    // Total question count
-    // ======================================
-
-    const totalQuestions = useMemo(() => {
-
-        return (
-            counts.mcq +
-            counts.trueFalse +
-            counts.fillBlank +
-            counts.shortAnswer
-        );
-
-    }, [counts]);
-
-    // ======================================
-    // Total Bloom count
-    // ======================================
-
-    const bloomTotal = useMemo(() => {
-
-        return (
-            bloomCounts.remember +
-            bloomCounts.understand +
-            bloomCounts.apply +
-            bloomCounts.analyze +
-            bloomCounts.evaluate +
-            bloomCounts.create
-        );
-
-    }, [bloomCounts]);
-
-    const bloomMatches =
-        bloomTotal === totalQuestions;
-
-    // ======================================
-    // Dropdown values 0 - 20
-    // ======================================
-
-    const countOptions =
-        Array.from(
-            { length: 21 },
-            (_, index) => index
-        );
-
-    // ======================================
-    // Question type dropdown
-    // ======================================
-
-    const handleCountChange = (
-        key,
-        value
-    ) => {
-
-        setCounts({
-            ...counts,
-            [key]: Number(value)
-        });
-    };
-
-    // ======================================
-    // Bloom dropdown
-    // ======================================
-
-    const handleBloomChange = (
-        key,
-        value
-    ) => {
-
-        setBloomCounts({
-            ...bloomCounts,
-            [key]: Number(value)
-        });
-    };
-
-    // ======================================
-    // Generate Questions
-    // ======================================
-
-    const handleGenerate = async (event) => {
-
-        event.preventDefault();
-
-        setError("");
-        setSuccess("");
-        setQuestions([]);
-
-        if (!file) {
-
-            setError(
-                "Please select a PDF file."
-            );
-
-            return;
-        }
-
-        if (totalQuestions === 0) {
-
-            setError(
-                "Please select at least one question."
-            );
-
-            return;
-        }
-
-        if (!bloomMatches) {
-
-            setError(
-                `Bloom total (${bloomTotal}) must equal total questions (${totalQuestions}).`
-            );
-
-            return;
-        }
-
-        const formData =
-            new FormData();
-
-        formData.append(
-            "file",
-            file
-        );
-
-        formData.append(
-            "mcq_count",
-            counts.mcq
-        );
-
-        formData.append(
-            "true_false_count",
-            counts.trueFalse
-        );
-
-        formData.append(
-            "fill_blank_count",
-            counts.fillBlank
-        );
-
-        formData.append(
-            "short_answer_count",
-            counts.shortAnswer
-        );
-
-        formData.append(
-            "difficulty",
-            difficulty
-        );
-
-        formData.append(
-            "remember_count",
-            bloomCounts.remember
-        );
-
-        formData.append(
-            "understand_count",
-            bloomCounts.understand
-        );
-
-        formData.append(
-            "apply_count",
-            bloomCounts.apply
-        );
-
-        formData.append(
-            "analyze_count",
-            bloomCounts.analyze
-        );
-
-        formData.append(
-            "evaluate_count",
-            bloomCounts.evaluate
-        );
-
-        formData.append(
-            "create_count",
-            bloomCounts.create
-        );
-
-        try {
-
-            setLoading(true);
-
-            const response =
-                await fetch(
-                    `${BACKEND_URL}/api/generate-questions`,
-                    {
-                        method: "POST",
-                        body: formData
-                    }
-                );
-
-            const data =
-                await response.json();
-
-            if (!response.ok) {
-
-                throw new Error(
-                    data.error ||
-                    data.detail ||
-                    data.message ||
-                    "Question generation failed."
-                );
+const initial = {
+    mcq_count: 2,
+    true_false_count: 1,
+    statement_mcq_count: 1,
+    fill_blank_count: 1,
+    short_answer_count: 0,
+    difficulty: "Medium",
+    remember_count: 1,
+    understand_count: 1,
+    apply_count: 1,
+    analyze_count: 1,
+    evaluate_count: 0,
+    create_count: 0
+};
+
+async function readResponse(response) {
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        let message = data.message || data.detail || "Request failed.";
+        if (data.error === "GEMINI_QUOTA_EXHAUSTED" && data.retry_at) {
+            const date = new Date(data.retry_at);
+            if (!Number.isNaN(date.getTime())) {
+                message = `Gemini quota exhausted. Estimated retry time: ${date.toLocaleString()}.`;
             }
+        }
+        throw new Error(message);
+    }
+    return data;
+}
 
-            if (!data.success) {
+export default function GenerateQuestions() {
+    const navigate = useNavigate();
+    const [files, setFiles] = useState([]);
+    const [values, setValues] = useState(initial);
+    const [title, setTitle] = useState(sessionStorage.getItem("examTitle") || "");
+    const [subject, setSubject] = useState(sessionStorage.getItem("examSubject") || "");
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState("");
 
-                setError(
-                    data.message ||
-                    "Question generation failed."
-                );
+    const totalQuestions = useMemo(
+        () => typeFields.reduce((sum, [key]) => sum + Number(values[key]), 0),
+        [values]
+    );
+    const totalBloom = useMemo(
+        () => bloomFields.reduce((sum, [key]) => sum + Number(values[key]), 0),
+        [values]
+    );
 
-                if (data.questions) {
+    function update(key, value) {
+        setValues(current => ({ ...current, [key]: value }));
+    }
 
-                    setQuestions(
-                        data.questions
-                    );
-                }
+    function selectFiles(event) {
+        setError("");
+        const chosen = Array.from(event.target.files || []);
+        const merged = [...files];
 
+        for (const file of chosen) {
+            if (!file.name.toLowerCase().endsWith(".pdf")) {
+                setError(`${file.name} is not a PDF.`);
                 return;
             }
+            if (file.size > 25 * 1024 * 1024) {
+                setError(`${file.name} exceeds 25 MB.`);
+                return;
+            }
+            if (!merged.some(f => f.name === file.name && f.size === file.size)) {
+                merged.push(file);
+            }
+        }
 
-            setQuestions(
-                data.questions || []
-            );
+        if (merged.length > 5) {
+            setError("You can upload a maximum of 5 PDFs.");
+            return;
+        }
+        if (merged.reduce((sum, f) => sum + f.size, 0) > 100 * 1024 * 1024) {
+            setError("Combined PDF size cannot exceed 100 MB.");
+            return;
+        }
+        setFiles(merged);
+        event.target.value = "";
+    }
 
-            setSuccess(
-                `Successfully generated ${data.questions.length} questions.`
-            );
+    async function analyse(event) {
+        event.preventDefault();
+        setError("");
 
+        if (!title.trim()) return setError("Enter an exam title.");
+        if (!files.length) return setError("Upload at least one PDF.");
+        if (totalQuestions < 1) return setError("Select at least one question.");
+        if (totalBloom !== totalQuestions) {
+            return setError(`Bloom total (${totalBloom}) must equal question total (${totalQuestions}).`);
+        }
+
+        setLoading(true);
+        try {
+            const form = new FormData();
+            files.forEach(file => form.append("files", file));
+
+            const response = await fetch(`${API_URL}/api/analyze-material`, {
+                method: "POST",
+                body: form
+            });
+            const data = await readResponse(response);
+
+            if (!data.generation_id || !data.conceptGraph) {
+                throw new Error("Material analysis response is incomplete.");
+            }
+
+            sessionStorage.setItem("generationId", data.generation_id);
+            sessionStorage.setItem("conceptGraph", JSON.stringify(data.conceptGraph));
+            sessionStorage.setItem("generationSettings", JSON.stringify(values));
+            sessionStorage.setItem("examTitle", title.trim());
+            sessionStorage.setItem("examSubject", subject.trim());
+            sessionStorage.setItem("sourceFiles", JSON.stringify(data.sourceFiles || []));
+
+            navigate("/select-concepts");
         } catch (err) {
-
-            console.error(err);
-
-            setError(
-                err.message ||
-                "Could not connect to backend."
-            );
-
+            setError(err.message || "Material analysis failed.");
         } finally {
-
             setLoading(false);
         }
-    };
+    }
 
     return (
-
-        <div
-            style={{
-                padding: "30px",
-                maxWidth: "1100px",
-                margin: "0 auto"
-            }}
-        >
-
-            <h1>
-                Generate Questions
-            </h1>
-
-            <p>
-                Upload study material and configure
-                the exact question distribution.
-            </p>
-
-            <form
-                onSubmit={handleGenerate}
-            >
-
-                {/* ================================= */}
-                {/* PDF */}
-                {/* ================================= */}
-
-                <div
-                    style={{
-                        marginBottom: "25px"
-                    }}
-                >
-
-                    <label>
-                        <strong>
-                            Study Material PDF
-                        </strong>
-                    </label>
-
-                    <br />
-
-                    <input
-                        type="file"
-                        accept=".pdf,application/pdf"
-                        onChange={(event) =>
-                            setFile(
-                                event.target.files[0]
-                            )
-                        }
-                    />
-
-                    {file && (
-                        <p>
-                            Selected:
-                            {" "}
-                            {file.name}
-                        </p>
-                    )}
-
+        <div className="workflow-page generate-page">
+            <header className="workflow-header">
+                <div>
+                    <p className="eyebrow">Agentic AI Exam System</p>
+                    <h1>Create Examination</h1>
+                    <p>Step 1 of 4 — Upload material and configure your paper</p>
                 </div>
+            </header>
 
-
-                {/* ================================= */}
-                {/* QUESTION TYPES */}
-                {/* ================================= */}
-
-                <h2>
-                    Question Distribution
-                </h2>
-
-                {questionTypeFields.map(
-                    (field) => (
-
-                        <div
-                            key={field.key}
-                            style={{
-                                marginBottom: "12px"
-                            }}
-                        >
-
+            <main className="workflow-card">
+                <form onSubmit={analyse}>
+                    <section>
+                        <h2>Exam details</h2>
+                        <div className="form-grid">
                             <label>
-                                {field.label}
+                                Exam title
+                                <input value={title} onChange={e => setTitle(e.target.value)} required />
                             </label>
-
-                            <select
-                                value={
-                                    counts[field.key]
-                                }
-                                onChange={(event) =>
-                                    handleCountChange(
-                                        field.key,
-                                        event.target.value
-                                    )
-                                }
-                                style={{
-                                    marginLeft: "15px",
-                                    padding: "7px",
-                                    minWidth: "100px"
-                                }}
-                            >
-
-                                {countOptions.map(
-                                    (number) => (
-
-                                        <option
-                                            key={number}
-                                            value={number}
-                                        >
-                                            {number}
-                                        </option>
-                                    )
-                                )}
-
-                            </select>
-
-                        </div>
-                    )
-                )}
-
-
-                {/* ================================= */}
-                {/* TOTAL */}
-                {/* ================================= */}
-
-                <div
-                    style={{
-                        marginTop: "20px",
-                        marginBottom: "25px",
-                        padding: "15px",
-                        border: "1px solid #ddd",
-                        borderRadius: "8px"
-                    }}
-                >
-
-                    <strong>
-                        Total Questions:
-                    </strong>
-
-                    {" "}
-
-                    {totalQuestions}
-
-                </div>
-
-
-                {/* ================================= */}
-                {/* DIFFICULTY */}
-                {/* ================================= */}
-
-                <h2>
-                    Difficulty
-                </h2>
-
-                <select
-                    value={difficulty}
-                    onChange={(event) =>
-                        setDifficulty(
-                            event.target.value
-                        )
-                    }
-                    style={{
-                        padding: "8px",
-                        minWidth: "150px",
-                        marginBottom: "25px"
-                    }}
-                >
-
-                    <option value="Low">
-                        Low
-                    </option>
-
-                    <option value="Medium">
-                        Medium
-                    </option>
-
-                    <option value="High">
-                        High
-                    </option>
-
-                </select>
-
-
-                {/* ================================= */}
-                {/* BLOOM */}
-                {/* ================================= */}
-
-                <h2>
-                    Bloom's Taxonomy Distribution
-                </h2>
-
-                <p>
-                    The Bloom total must exactly equal
-                    the total number of questions.
-                </p>
-
-                {bloomFields.map(
-                    (field) => (
-
-                        <div
-                            key={field.key}
-                            style={{
-                                marginBottom: "12px"
-                            }}
-                        >
-
                             <label>
-                                {field.label}
+                                Subject
+                                <input value={subject} onChange={e => setSubject(e.target.value)} />
                             </label>
-
-                            <select
-                                value={
-                                    bloomCounts[field.key]
-                                }
-                                onChange={(event) =>
-                                    handleBloomChange(
-                                        field.key,
-                                        event.target.value
-                                    )
-                                }
-                                style={{
-                                    marginLeft: "15px",
-                                    padding: "7px",
-                                    minWidth: "100px"
-                                }}
-                            >
-
-                                {countOptions.map(
-                                    (number) => (
-
-                                        <option
-                                            key={number}
-                                            value={number}
-                                        >
-                                            {number}
-                                        </option>
-                                    )
-                                )}
-
-                            </select>
-
                         </div>
-                    )
-                )}
+                    </section>
 
+                    <section>
+                        <h2>Study material</h2>
+                        <label className="file-field upload-dropzone">
+                            <strong>Choose PDF files</strong>
+                            <span>PDF only · Maximum 5 files · 25 MB each · 100 MB combined</span>
+                            <input type="file" accept=".pdf,application/pdf" multiple onChange={selectFiles} />
+                        </label>
 
-                {/* ================================= */}
-                {/* BLOOM TOTAL STATUS */}
-                {/* ================================= */}
-
-                <div
-                    style={{
-                        marginTop: "20px",
-                        marginBottom: "25px",
-                        padding: "15px",
-                        border: "1px solid #ddd",
-                        borderRadius: "8px"
-                    }}
-                >
-
-                    <strong>
-                        Bloom Total:
-                    </strong>
-
-                    {" "}
-
-                    {bloomTotal}
-
-                    {" / "}
-
-                    {totalQuestions}
-
-                    <br />
-
-                    {bloomMatches ? (
-
-                        <span>
-                            ✓ Bloom distribution matches.
-                        </span>
-
-                    ) : (
-
-                        <span>
-                            ⚠ Bloom total must equal
-                            total questions.
-                        </span>
-                    )}
-
-                </div>
-
-
-                {/* ================================= */}
-                {/* ERROR */}
-                {/* ================================= */}
-
-                {error && (
-
-                    <div
-                        style={{
-                            padding: "12px",
-                            marginBottom: "15px"
-                        }}
-                    >
-                        {error}
-                    </div>
-                )}
-
-
-                {/* ================================= */}
-                {/* SUCCESS */}
-                {/* ================================= */}
-
-                {success && (
-
-                    <div
-                        style={{
-                            padding: "12px",
-                            marginBottom: "15px"
-                        }}
-                    >
-                        {success}
-                    </div>
-                )}
-
-
-                {/* ================================= */}
-                {/* GENERATE BUTTON */}
-                {/* ================================= */}
-
-                <button
-                    type="submit"
-                    disabled={
-                        loading ||
-                        !file ||
-                        totalQuestions === 0 ||
-                        !bloomMatches
-                    }
-                    style={{
-                        padding: "12px 24px",
-                        cursor:
-                            loading ||
-                            !file ||
-                            totalQuestions === 0 ||
-                            !bloomMatches
-                                ? "not-allowed"
-                                : "pointer"
-                    }}
-                >
-
-                    {loading
-                        ? "Generating..."
-                        : "Generate Questions"}
-
-                </button>
-
-            </form>
-
-
-            {/* ================================= */}
-            {/* GENERATED QUESTIONS */}
-            {/* ================================= */}
-
-            {questions.length > 0 && (
-
-                <div
-                    style={{
-                        marginTop: "40px"
-                    }}
-                >
-
-                    <h2>
-                        Generated Questions
-                    </h2>
-
-                    {questions.map(
-                        (question, index) => (
-
-                            <div
-                                key={index}
-                                style={{
-                                    padding: "20px",
-                                    marginBottom: "15px",
-                                    border:
-                                        "1px solid #ddd",
-                                    borderRadius: "8px"
-                                }}
-                            >
-
-                                <h3>
-                                    Question{" "}
-                                    {index + 1}
-                                </h3>
-
-                                <p>
-                                    <strong>
-                                        {question.question}
-                                    </strong>
-                                </p>
-
-                                <p>
-                                    Type:
-                                    {" "}
-                                    {question.type}
-                                </p>
-
-                                <p>
-                                    Bloom:
-                                    {" "}
-                                    {question.bloomLevel}
-                                </p>
-
-                                <p>
-                                    Difficulty:
-                                    {" "}
-                                    {question.difficulty}
-                                </p>
-
-                                <p>
-                                    Marks:
-                                    {" "}
-                                    {question.marks}
-                                </p>
-
-                                {question.type ===
-                                    "MCQ" && (
-
-                                    <ol type="A">
-
-                                        {question.options.map(
-                                            (option, optionIndex) => (
-
-                                                <li
-                                                    key={
-                                                        optionIndex
-                                                    }
-                                                >
-                                                    {option}
-                                                </li>
-                                            )
-                                        )}
-
-                                    </ol>
-                                )}
-
-                                <p>
-                                    <strong>
-                                        Correct Answer:
-                                    </strong>
-                                    {" "}
-                                    {question.correctAnswer}
-                                </p>
-
-                                <p>
-                                    <strong>
-                                        Concept:
-                                    </strong>
-                                    {" "}
-                                    {question.concept}
-                                </p>
-
+                        {files.map((file, index) => (
+                            <div className="selected-file" key={`${file.name}-${index}`}>
+                                <span>{file.name} · {(file.size / 1048576).toFixed(2)} MB</span>
+                                <button type="button" className="secondary-button"
+                                    onClick={() => setFiles(current => current.filter((_, i) => i !== index))}>
+                                    Remove
+                                </button>
                             </div>
-                        )
-                    )}
+                        ))}
+                    </section>
 
-                </div>
-            )}
+                    <section>
+                        <h2>Question types</h2>
+                        <div className="count-grid">
+                            {typeFields.map(([key, label]) => (
+                                <label key={key}>
+                                    {label}
+                                    <select value={values[key]}
+                                        onChange={e => update(key, Number(e.target.value))}>
+                                        {Array.from({ length: 51 }, (_, n) =>
+                                            <option value={n} key={n}>{n}</option>
+                                        )}
+                                    </select>
+                                </label>
+                            ))}
+                        </div>
+                        <p className="total-line">Total questions: <strong>{totalQuestions}</strong></p>
+                    </section>
 
+                    <section>
+                        <h2>Difficulty</h2>
+                        <select value={values.difficulty}
+                            onChange={e => update("difficulty", e.target.value)}>
+                            <option>Low</option>
+                            <option>Medium</option>
+                            <option>High</option>
+                        </select>
+                    </section>
+
+                    <section>
+                        <h2>Bloom's Taxonomy distribution</h2>
+                        <div className="count-grid bloom-grid">
+                            {bloomFields.map(([key, label]) => (
+                                <label key={key}>
+                                    {label}
+                                    <select value={values[key]}
+                                        onChange={e => update(key, Number(e.target.value))}>
+                                        {Array.from({ length: 51 }, (_, n) =>
+                                            <option value={n} key={n}>{n}</option>
+                                        )}
+                                    </select>
+                                </label>
+                            ))}
+                        </div>
+                        <p className={totalBloom === totalQuestions ? "match-badge" : "field-error"}>
+                            Bloom total: {totalBloom} / {totalQuestions}
+                        </p>
+                    </section>
+
+                    {error && <div className="error-box" role="alert">{error}</div>}
+
+                    <button className="primary-button" type="submit" disabled={loading}>
+                        {loading ? "Analysing all uploaded pages..." : "Analyse material and continue"}
+                    </button>
+                </form>
+            </main>
         </div>
     );
 }
-
-export default GenerateQuestions;

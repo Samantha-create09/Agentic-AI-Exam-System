@@ -1,82 +1,70 @@
+import json
 import os
+import time
 
+import requests
+
+from dotenv import load_dotenv
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
 
 
-# ============================================================
-# GOOGLE FORMS API
-# ============================================================
-
-SCOPES = [
-    "https://www.googleapis.com/auth/forms.body"
-]
-
-DISCOVERY_DOC = (
-    "https://forms.googleapis.com/"
-    "$discovery/rest?version=v1"
-)
-
-CREDENTIALS_FILE = "credentials.json"
-
-TOKEN_FILE = "token.json"
+load_dotenv()
 
 
 class GoogleFormsService:
 
+    SCOPES = [
+        "https://www.googleapis.com/auth/forms.body"
+    ]
+
+    BASE_URL = (
+        "https://forms.googleapis.com/v1"
+    )
+
     def __init__(self):
 
-        self.credentials = (
-            self._get_credentials()
+        self.base_dir = os.path.dirname(
+            os.path.dirname(
+                os.path.abspath(__file__)
+            )
         )
 
-        self.service = build(
-
-            "forms",
-
-            "v1",
-
-            credentials=self.credentials,
-
-            discoveryServiceUrl=
-                DISCOVERY_DOC,
-
-            static_discovery=False
+        self.credentials_file = os.path.join(
+            self.base_dir,
+            "credentials.json"
         )
 
+        self.token_file = os.path.join(
+            self.base_dir,
+            "token.json"
+        )
 
-    # ========================================================
-    # AUTHENTICATION
-    # ========================================================
+        self.session = requests.Session()
+
+        self.credentials = self._get_credentials()
+
+
+    # ============================================================
+    # GOOGLE OAUTH
+    # ============================================================
 
     def _get_credentials(self):
 
         credentials = None
 
-
-        # ----------------------------------------------------
-        # Existing token
-        # ----------------------------------------------------
-
         if os.path.exists(
-            TOKEN_FILE
+            self.token_file
         ):
 
             credentials = (
                 Credentials.from_authorized_user_file(
-
-                    TOKEN_FILE,
-
-                    SCOPES
+                    self.token_file,
+                    self.SCOPES
                 )
             )
 
-
-        # ----------------------------------------------------
-        # Refresh or perform OAuth
-        # ----------------------------------------------------
 
         if (
             not credentials
@@ -96,27 +84,21 @@ class GoogleFormsService:
             else:
 
                 if not os.path.exists(
-                    CREDENTIALS_FILE
+                    self.credentials_file
                 ):
 
                     raise FileNotFoundError(
-
-                        "credentials.json was not found in "
-                        "ai-service. Put the downloaded Google "
-                        "OAuth Desktop client JSON file here."
+                        "credentials.json was not found at: "
+                        + self.credentials_file
                     )
-
 
                 flow = (
                     InstalledAppFlow
                     .from_client_secrets_file(
-
-                        CREDENTIALS_FILE,
-
-                        SCOPES
+                        self.credentials_file,
+                        self.SCOPES
                     )
                 )
-
 
                 credentials = (
                     flow.run_local_server(
@@ -125,13 +107,10 @@ class GoogleFormsService:
                 )
 
 
-            # ------------------------------------------------
-            # Save token
-            # ------------------------------------------------
-
             with open(
-                TOKEN_FILE,
-                "w"
+                self.token_file,
+                "w",
+                encoding="utf-8"
             ) as token:
 
                 token.write(
@@ -142,9 +121,593 @@ class GoogleFormsService:
         return credentials
 
 
-    # ========================================================
-    # CREATE GOOGLE FORM QUIZ
-    # ========================================================
+    # ============================================================
+    # AUTHORIZATION HEADER
+    # ============================================================
+
+    def _headers(self):
+
+        if (
+            not self.credentials
+            or not self.credentials.valid
+        ):
+
+            if (
+                self.credentials
+                and self.credentials.expired
+                and self.credentials.refresh_token
+            ):
+
+                self.credentials.refresh(
+                    Request()
+                )
+
+                with open(
+                    self.token_file,
+                    "w",
+                    encoding="utf-8"
+                ) as token:
+
+                    token.write(
+                        self.credentials.to_json()
+                    )
+
+            else:
+
+                raise RuntimeError(
+                    "Google authentication is not valid."
+                )
+
+
+        return {
+            "Authorization":
+                f"Bearer {self.credentials.token}",
+
+            "Content-Type":
+                "application/json",
+
+            "Accept":
+                "application/json"
+        }
+
+
+    # ============================================================
+    # HTTP REQUEST WITH RETRIES
+    # ============================================================
+
+    def _request(
+        self,
+        method,
+        url,
+        payload=None,
+        retries=3
+    ):
+
+        last_error = None
+
+
+        for attempt in range(
+            retries
+        ):
+
+            try:
+
+                response = self.session.request(
+
+                    method=method,
+
+                    url=url,
+
+                    headers=self._headers(),
+
+                    json=payload,
+
+                    timeout=60
+
+                )
+
+
+                if response.status_code >= 400:
+
+                    try:
+
+                        error_data = (
+                            response.json()
+                        )
+
+                    except Exception:
+
+                        error_data = (
+                            response.text
+                        )
+
+                    raise RuntimeError(
+
+                        "Google Forms API error "
+                        f"{response.status_code}: "
+                        f"{error_data}"
+
+                    )
+
+
+                if not response.text:
+
+                    return {}
+
+
+                return response.json()
+
+
+            except (
+                requests.exceptions.SSLError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout
+            ) as error:
+
+                last_error = error
+
+                if attempt < retries - 1:
+
+                    time.sleep(
+                        2 ** attempt
+                    )
+
+                else:
+
+                    raise RuntimeError(
+                        "Could not connect to Google "
+                        "Forms API after multiple attempts. "
+                        f"Original error: {error}"
+                    )
+
+
+        raise RuntimeError(
+            str(last_error)
+        )
+
+
+    # ============================================================
+    # CREATE FORM
+    # ============================================================
+
+    def _create_form(
+        self,
+        title
+    ):
+
+        payload = {
+
+            "info": {
+
+                "title":
+                    title
+
+            }
+
+        }
+
+        return self._request(
+
+            "POST",
+
+            f"{self.BASE_URL}/forms",
+
+            payload
+
+        )
+
+
+    # ============================================================
+    # BUILD GOOGLE FORMS QUESTION
+    # ============================================================
+
+    def _build_question_item(self, question):
+
+
+        question_text = str(
+            question.get("question", "")
+        ).strip()
+
+        question_type = str(
+            question.get("type", "")
+        ).upper()
+
+        # Every question carries exactly one mark.
+        marks = 1
+
+        accepted_answers = question.get(
+            "acceptedAnswers",
+            []
+        )
+
+        if not isinstance(accepted_answers, list):
+            accepted_answers = []
+
+        correct_answer = str(
+            question.get("correctAnswer", "")
+        ).strip()
+
+        correct_values = []
+
+        # --------------------------------------------------------
+        # ACCEPTED ANSWERS FOR TEXT QUESTIONS
+        # --------------------------------------------------------
+
+        if question_type in [
+            "FILL_BLANK",
+            "SHORT_ANSWER"
+        ]:
+
+            values = []
+
+            if correct_answer:
+                values.append(correct_answer)
+
+            for answer in accepted_answers:
+
+                answer = str(answer).strip()
+
+                if answer:
+                    values.append(answer)
+
+            seen = set()
+
+            for value in values:
+
+                normalized = value.casefold()
+
+                if normalized not in seen:
+                    seen.add(normalized)
+                    correct_values.append(value)
+
+        else:
+
+            if correct_answer:
+                correct_values = [correct_answer]
+
+        # --------------------------------------------------------
+        # GOOGLE FORMS GRADING
+        # --------------------------------------------------------
+
+        grading = {
+            "pointValue": marks,
+            "correctAnswers": {
+                "answers": [
+                    {"value": value}
+                    for value in correct_values
+                ]
+            }
+        }
+
+        # --------------------------------------------------------
+        # REGULAR MCQ + STATEMENT-BASED TRUE/FALSE MCQ
+        # --------------------------------------------------------
+
+        if question_type in [
+            "MCQ",
+            "STATEMENT_MCQ"
+        ]:
+
+            options = question.get("options", [])
+
+            if not isinstance(options, list):
+                raise ValueError(
+                    f"{question_type} options must be a list."
+                )
+
+            if len(options) != 4:
+                raise ValueError(
+                    f"{question_type} must have exactly four options."
+                )
+
+            if len(set(options)) != 4:
+                raise ValueError(
+                    f"{question_type} options must be unique."
+                )
+
+            if correct_answer not in options:
+                raise ValueError(
+                    f"{question_type} correct answer must match one of its options."
+                )
+
+            if question_type == "STATEMENT_MCQ":
+
+                expected_options = [
+                    "Both statements are true.",
+                    "Both statements are false.",
+                    "Statement I is true, but Statement II is false.",
+                    "Statement I is false, but Statement II is true."
+                ]
+
+                if options != expected_options:
+                    raise ValueError(
+                        "Statement-based MCQ must use the four standard answer options."
+                    )
+
+                question_lower = question_text.casefold()
+
+                if (
+                    "statement i:" not in question_lower
+                    or "statement ii:" not in question_lower
+                ):
+                    raise ValueError(
+                        "Statement-based MCQ must contain Statement I and Statement II."
+                    )
+
+            return {
+                "item": {
+                    "title": question_text,
+                    "questionItem": {
+                        "question": {
+                            "required": True,
+                            "grading": grading,
+                            "choiceQuestion": {
+                                "type": "RADIO",
+                                "options": [
+                                    {"value": str(option)}
+                                    for option in options
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+
+        # --------------------------------------------------------
+        # NORMAL TRUE / FALSE
+        # --------------------------------------------------------
+
+        if question_type == "TRUE_FALSE":
+
+            if correct_answer not in ["True", "False"]:
+                raise ValueError(
+                    "True/False answer must be True or False."
+                )
+
+            return {
+                "item": {
+                    "title": question_text,
+                    "questionItem": {
+                        "question": {
+                            "required": True,
+                            "grading": grading,
+                            "choiceQuestion": {
+                                "type": "RADIO",
+                                "options": [
+                                    {"value": "True"},
+                                    {"value": "False"}
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+
+        # --------------------------------------------------------
+        # FILL IN THE BLANK
+        # --------------------------------------------------------
+
+        if question_type == "FILL_BLANK":
+
+            if not correct_values:
+                raise ValueError(
+                    "Fill-in-the-blank requires at least one correct answer."
+                )
+
+            return {
+                "item": {
+                    "title": question_text,
+                    "questionItem": {
+                        "question": {
+                            "required": True,
+                            "grading": grading,
+                            "textQuestion": {
+                                "paragraph": False
+                            }
+                        }
+                    }
+                }
+            }
+
+        # --------------------------------------------------------
+        # SHORT ANSWER
+        # --------------------------------------------------------
+
+        if question_type == "SHORT_ANSWER":
+
+            if not correct_values:
+                raise ValueError(
+                    "Short answer requires at least one correct answer."
+                )
+
+            return {
+                "item": {
+                    "title": question_text,
+                    "questionItem": {
+                        "question": {
+                            "required": True,
+                            "grading": grading,
+                            "textQuestion": {
+                                "paragraph": False
+                            }
+                        }
+                    }
+                }
+            }
+
+        raise ValueError(
+            f"Unsupported question type: {question_type}"
+        )
+
+    # ============================================================
+    # UPDATE FORM
+    # ============================================================
+
+    def _update_form(
+        self,
+        form_id,
+        title,
+        description,
+        questions
+    ):
+
+        requests_list = []
+
+
+        # --------------------------------------------------------
+        # DESCRIPTION
+        # --------------------------------------------------------
+
+        if description:
+
+            requests_list.append({
+
+                "updateFormInfo": {
+
+                    "info": {
+
+                        "description":
+                            description
+
+                    },
+
+                    "updateMask":
+                        "description"
+
+                }
+
+            })
+
+
+        # --------------------------------------------------------
+        # CONVERT TO QUIZ
+        # --------------------------------------------------------
+
+        requests_list.append({
+
+            "updateSettings": {
+
+                "settings": {
+
+                    "quizSettings": {
+
+                        "isQuiz":
+                            True
+
+                    }
+
+                },
+
+                "updateMask":
+                    "quizSettings.isQuiz"
+
+            }
+
+        })
+
+
+        # --------------------------------------------------------
+        # QUESTIONS
+        # --------------------------------------------------------
+
+        for index, question in enumerate(
+            questions
+        ):
+
+            question_request = (
+                self._build_question_item(
+                    question
+                )
+            )
+
+
+            question_request[
+                "location"
+            ] = {
+
+                "index":
+                    index
+
+            }
+
+
+            requests_list.append(
+                {
+                    "createItem":
+                        question_request
+                }
+            )
+
+
+        payload = {
+
+            "includeFormInResponse":
+                True,
+
+            "requests":
+                requests_list
+
+        }
+
+
+        return self._request(
+
+            "POST",
+
+            f"{self.BASE_URL}/forms/"
+            f"{form_id}:batchUpdate",
+
+            payload
+
+        )
+
+
+    # ============================================================
+    # PUBLISH FORM
+    # ============================================================
+
+    def _publish_form(
+        self,
+        form_id
+    ):
+
+        payload = {
+
+            "publishSettings": {
+
+                "publishState": {
+
+                    "isPublished":
+                        True,
+
+                    "isAcceptingResponses":
+                        True
+
+                }
+
+            },
+
+            "updateMask":
+                "publishState"
+
+        }
+
+
+        return self._request(
+
+            "POST",
+
+            f"{self.BASE_URL}/forms/"
+            f"{form_id}:setPublishSettings",
+
+            payload
+
+        )
+
+
+    # ============================================================
+    # PUBLIC METHOD
+    # ============================================================
 
     def deploy_quiz(
         self,
@@ -156,23 +719,34 @@ class GoogleFormsService:
         if not title.strip():
 
             raise ValueError(
-                "Google Form title cannot be empty."
+                "Google Form title is required."
             )
 
 
-        if not questions:
+        if not isinstance(
+            questions,
+            list
+        ):
+
+            raise ValueError(
+                "questions must be a list."
+            )
+
+
+        if len(questions) == 0:
 
             raise ValueError(
                 "At least one question is required."
             )
 
 
-        # ====================================================
-        # VALIDATE QUESTION OBJECTS
-        # ====================================================
+        # --------------------------------------------------------
+        # Validate all questions before creating the form
+        # --------------------------------------------------------
 
         for index, question in enumerate(
-            questions
+            questions,
+            start=1
         ):
 
             if not isinstance(
@@ -181,7 +755,8 @@ class GoogleFormsService:
             ):
 
                 raise ValueError(
-                    f"Question {index + 1} is not a valid object."
+                    f"Question {index} is not "
+                    "a valid object."
                 )
 
 
@@ -190,53 +765,34 @@ class GoogleFormsService:
             ):
 
                 raise ValueError(
-                    f"Question {index + 1} has no question text."
+                    f"Question {index} has no "
+                    "question text."
                 )
 
 
             if question.get(
-                "marks"
+                "marks",
+                1
             ) != 1:
 
-                question["marks"] = 1
+                raise ValueError(
+                    f"Question {index} does not "
+                    "have exactly 1 mark."
+                )
 
 
-        # ====================================================
-        # CREATE EMPTY FORM
-        #
-        # Google Forms API creates the form first.
-        # Questions/settings are added afterward.
-        # ====================================================
+        # --------------------------------------------------------
+        # CREATE
+        # --------------------------------------------------------
 
-        create_body = {
-
-            "info": {
-
-                "title":
-                    title,
-
-                "documentTitle":
-                    title
-            }
-        }
-
-
-        form = (
-            self.service
-            .forms()
-            .create(
-                body=create_body,
-
-                # New API-created forms after June 30, 2026
-                # are unpublished by default, so we explicitly
-                # publish them after construction.
-                unpublished=True
+        created_form = (
+            self._create_form(
+                title
             )
-            .execute()
         )
 
 
-        form_id = form.get(
+        form_id = created_form.get(
             "formId"
         )
 
@@ -244,437 +800,51 @@ class GoogleFormsService:
         if not form_id:
 
             raise RuntimeError(
-                "Google Forms API did not return a formId."
+                "Google did not return a formId."
             )
 
 
-        # ====================================================
-        # UPDATE DESCRIPTION + MAKE QUIZ
-        # ====================================================
+        # --------------------------------------------------------
+        # ADD QUIZ SETTINGS + QUESTIONS
+        # --------------------------------------------------------
 
-        requests = []
+        updated_form = (
+            self._update_form(
 
+                form_id=form_id,
 
-        if description.strip():
+                title=title,
 
-            requests.append({
+                description=description,
 
-                "updateFormInfo": {
+                questions=questions
 
-                    "info": {
-
-                        "description":
-                            description
-                    },
-
-                    "updateMask":
-                        "description"
-                }
-            })
-
-
-        # ----------------------------------------------------
-        # Convert to quiz
-        # ----------------------------------------------------
-
-        requests.append({
-
-            "updateSettings": {
-
-                "settings": {
-
-                    "quizSettings": {
-
-                        "isQuiz":
-                            True
-                    }
-                },
-
-                "updateMask":
-                    "quizSettings.isQuiz"
-            }
-        })
-
-
-        # ====================================================
-        # CREATE QUESTIONS
-        # ====================================================
-
-        for index, question in enumerate(
-            questions
-        ):
-
-            question_type = question.get(
-                "type"
             )
-
-
-            question_text = question.get(
-                "question"
-            )
-
-
-            correct_answer = str(
-                question.get(
-                    "correctAnswer",
-                    ""
-                )
-            )
-
-
-            accepted_answers = (
-                question.get(
-                    "acceptedAnswers",
-                    []
-                )
-            )
-
-
-            # =================================================
-            # MCQ
-            # =================================================
-
-            if question_type == "MCQ":
-
-                options = [
-
-                    {
-                        "value":
-                            str(option)
-                    }
-
-                    for option in question.get(
-                        "options",
-                        []
-                    )
-                ]
-
-
-                if len(options) != 4:
-
-                    raise ValueError(
-
-                        f"MCQ question {index + 1} "
-                        "must contain exactly 4 options."
-                    )
-
-
-                form_question = {
-
-                    "required":
-                        True,
-
-                    "grading": {
-
-                        "pointValue":
-                            1,
-
-                        "correctAnswers": {
-
-                            "answers": [
-
-                                {
-                                    "value":
-                                        correct_answer
-                                }
-
-                            ]
-                        }
-                    },
-
-                    "choiceQuestion": {
-
-                        "type":
-                            "RADIO",
-
-                        "options":
-                            options,
-
-                        "shuffle":
-                            False
-                    }
-                }
-
-
-            # =================================================
-            # TRUE / FALSE
-            # =================================================
-
-            elif question_type == "TRUE_FALSE":
-
-                form_question = {
-
-                    "required":
-                        True,
-
-                    "grading": {
-
-                        "pointValue":
-                            1,
-
-                        "correctAnswers": {
-
-                            "answers": [
-
-                                {
-                                    "value":
-                                        correct_answer
-                                }
-
-                            ]
-                        }
-                    },
-
-                    "choiceQuestion": {
-
-                        "type":
-                            "RADIO",
-
-                        "options": [
-
-                            {
-                                "value":
-                                    "True"
-                            },
-
-                            {
-                                "value":
-                                    "False"
-                            }
-
-                        ],
-
-                        "shuffle":
-                            False
-                    }
-                }
-
-
-            # =================================================
-            # FILL IN THE BLANK
-            # =================================================
-
-            elif question_type == "FILL_BLANK":
-
-                answers = []
-
-                for answer in accepted_answers:
-
-                    answers.append({
-
-                        "value":
-                            str(answer)
-                    })
-
-
-                if not answers:
-
-                    answers = [
-
-                        {
-                            "value":
-                                correct_answer
-                        }
-
-                    ]
-
-
-                form_question = {
-
-                    "required":
-                        True,
-
-                    "grading": {
-
-                        "pointValue":
-                            1,
-
-                        "correctAnswers": {
-
-                            "answers":
-                                answers
-                        }
-                    },
-
-                    "textQuestion": {
-
-                        "paragraph":
-                            False
-                    }
-                }
-
-
-            # =================================================
-            # SHORT ANSWER
-            # =================================================
-
-            elif question_type == "SHORT_ANSWER":
-
-                answers = []
-
-                if accepted_answers:
-
-                    for answer in accepted_answers:
-
-                        answers.append({
-
-                            "value":
-                                str(answer)
-                        })
-
-                else:
-
-                    answers.append({
-
-                        "value":
-                            correct_answer
-                    })
-
-
-                form_question = {
-
-                    "required":
-                        True,
-
-                    "grading": {
-
-                        "pointValue":
-                            1,
-
-                        "correctAnswers": {
-
-                            "answers":
-                                answers
-                        }
-                    },
-
-                    "textQuestion": {
-
-                        "paragraph":
-                            False
-                    }
-                }
-
-
-            else:
-
-                raise ValueError(
-
-                    f"Unsupported question type: "
-                    f"{question_type}"
-                )
-
-
-            # =================================================
-            # ADD QUESTION TO REQUEST
-            # =================================================
-
-            requests.append({
-
-                "createItem": {
-
-                    "item": {
-
-                        "title":
-                            question_text,
-
-                        "questionItem": {
-
-                            "question":
-                                form_question
-                        }
-                    },
-
-                    "location": {
-
-                        "index":
-                            index
-                    }
-                }
-            })
-
-
-        # ====================================================
-        # SEND ALL FORM UPDATES
-        # ====================================================
-
-        batch_result = (
-
-            self.service
-            .forms()
-            .batchUpdate(
-
-                formId=form_id,
-
-                body={
-
-                    "requests":
-                        requests,
-
-                    "includeFormInResponse":
-                        True
-                }
-            )
-            .execute()
         )
 
 
-        # ====================================================
-        # PUBLISH FORM
-        # ====================================================
+        # --------------------------------------------------------
+        # PUBLISH
+        # --------------------------------------------------------
 
         publish_result = (
-
-            self.service
-            .forms()
-            .setPublishSettings(
-
-                formId=form_id,
-
-                body={
-
-                    "publishSettings": {
-
-                        "publishState": {
-
-                            "isPublished":
-                                True,
-
-                            "isAcceptingResponses":
-                                True
-                        }
-                    }
-                }
-            )
-            .execute()
-        )
-
-
-        # ====================================================
-        # GET FINAL FORM
-        # ====================================================
-
-        final_form = (
-
-            self.service
-            .forms()
-            .get(
-                formId=form_id
-            )
-            .execute()
-        )
-
-
-        responder_uri = (
-            final_form.get(
-                "responderUri"
+            self._publish_form(
+                form_id
             )
         )
 
 
-        edit_url = (
-            f"https://docs.google.com/forms/d/"
-            f"{form_id}/edit"
+        # --------------------------------------------------------
+        # GET FINAL FORM DETAILS
+        # --------------------------------------------------------
+
+        final_form = self._request(
+
+            "GET",
+
+            f"{self.BASE_URL}/forms/"
+            f"{form_id}"
+
         )
 
 
@@ -683,24 +853,25 @@ class GoogleFormsService:
             "formId":
                 form_id,
 
+            "formUrl":
+                final_form.get(
+                    "responderUri"
+                ),
+
+            "editUrl":
+                f"https://docs.google.com/forms/d/"
+                f"{form_id}/edit",
+
             "title":
                 title,
 
-            "description":
-                description,
-
             "questionCount":
                 len(questions),
-
-            "editUrl":
-                edit_url,
-
-            "responderUrl":
-                responder_uri,
 
             "published":
                 True,
 
             "acceptingResponses":
                 True
+
         }

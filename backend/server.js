@@ -1,3 +1,4 @@
+
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
@@ -6,25 +7,39 @@ const { Pool } = require("pg");
 const multer = require("multer");
 const FormData = require("form-data");
 const fs = require("fs");
+const path = require("path");
 
 dotenv.config();
 
 const app = express();
-
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 
-// ======================================
-// Temporary PDF upload configuration
-// ======================================
+const AI_URL = process.env.AI_SERVICE_URL;
+const PORT = process.env.PORT || 5000;
+
+if (!AI_URL) {
+    console.error("AI_SERVICE_URL is missing from backend/.env");
+}
+
+const uploadDirectory = path.join(__dirname, "uploads");
+fs.mkdirSync(uploadDirectory, { recursive: true });
+
+const MAX_FILES = 5;
+const MAX_FILE_SIZE = 25 * 1024 * 1024;
+const MAX_TOTAL_SIZE = 100 * 1024 * 1024;
 
 const upload = multer({
-    dest: "uploads/"
+    dest: uploadDirectory,
+    limits: { fileSize: MAX_FILE_SIZE, files: MAX_FILES },
+    fileFilter: (req, file, cb) => {
+        const name = (file.originalname || "").toLowerCase();
+        if (!name.endsWith(".pdf")) {
+            return cb(new Error("Please upload PDF files only."));
+        }
+        cb(null, true);
+    }
 });
-
-// ======================================
-// PostgreSQL Connection
-// ======================================
 
 const pool = new Pool({
     user: process.env.DB_USER,
@@ -34,33 +49,42 @@ const pool = new Pool({
     port: process.env.DB_PORT
 });
 
-// ======================================
-// Basic Backend Test
-// ======================================
+function sendUpstreamError(res, error, fallback) {
+    const data = error.response?.data;
+    return res.status(error.response?.status || 500).json({
+        success: false,
+        error: data?.error,
+        message: data?.message || fallback,
+        detail: data?.detail || error.message,
+        retry_at: data?.retry_at,
+        retry_after_seconds: data?.retry_after_seconds
+    });
+}
+
+function cleanup(files) {
+    for (const file of files || []) {
+        if (file.path && fs.existsSync(file.path)) {
+            try {
+                fs.unlinkSync(file.path);
+            } catch (error) {
+                console.error("Upload cleanup error:", error.message);
+            }
+        }
+    }
+}
 
 app.get("/", (req, res) => {
-    res.json({
-        message: "Agentic AI Exam System Backend is running"
-    });
+    res.json({ message: "Agentic AI Exam System Backend is running" });
 });
-
-// ======================================
-// PostgreSQL Test
-// ======================================
 
 app.get("/api/test-db", async (req, res) => {
     try {
         const result = await pool.query("SELECT NOW()");
-
         res.json({
             message: "PostgreSQL connected successfully",
             time: result.rows[0].now
         });
-
     } catch (error) {
-
-        console.error(error);
-
         res.status(500).json({
             message: "Database connection failed",
             error: error.message
@@ -68,182 +92,193 @@ app.get("/api/test-db", async (req, res) => {
     }
 });
 
-// ======================================
-// FastAPI Connection Test
-// ======================================
-
 app.get("/api/test-ai", async (req, res) => {
-
     try {
-
-        const response = await axios.get(
-            `${process.env.AI_SERVICE_URL}/api/test`
-        );
-
+        const response = await axios.get(`${AI_URL}/api/test`, {
+            timeout: 10000
+        });
         res.json({
             message: "Node.js connected to FastAPI successfully",
             aiServiceResponse: response.data
         });
-
     } catch (error) {
-
-        console.error(error.message);
-
-        res.status(500).json({
-            message: "Could not connect to FastAPI",
-            error: error.message
-        });
+        sendUpstreamError(res, error, "Could not connect to FastAPI.");
     }
 });
 
-// ======================================
-// PDF Question Generation
-// Node.js → FastAPI
-// ======================================
-
+// STEP 1: upload PDFs and analyse them once.
 app.post(
-    "/api/generate-questions",
-    upload.single("file"),
+    "/api/analyze-material",
+    upload.array("files", MAX_FILES),
     async (req, res) => {
-
+        const files = req.files || [];
         try {
-
-            if (!req.file) {
-
+            if (!files.length) {
                 return res.status(400).json({
-                    message: "PDF file is required"
+                    success: false,
+                    message: "Please upload at least one PDF."
+                });
+            }
+
+            const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+            if (totalSize > MAX_TOTAL_SIZE) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Combined PDF size cannot exceed 100 MB."
                 });
             }
 
             const form = new FormData();
+            for (const file of files) {
+                form.append("files", fs.createReadStream(file.path), {
+                    filename: path.basename(file.originalname),
+                    contentType: "application/pdf"
+                });
+            }
 
-            // Send PDF
-            form.append(
-                "file",
-                fs.createReadStream(req.file.path)
-            );
-
-            // Question type counts
-            form.append(
-                "mcq_count",
-                req.body.mcq_count || "0"
-            );
-
-            form.append(
-                "true_false_count",
-                req.body.true_false_count || "0"
-            );
-
-            form.append(
-                "fill_blank_count",
-                req.body.fill_blank_count || "0"
-            );
-
-            form.append(
-                "short_answer_count",
-                req.body.short_answer_count || "0"
-            );
-
-            // Difficulty
-            form.append(
-                "difficulty",
-                req.body.difficulty || "Medium"
-            );
-
-            // Bloom counts
-            form.append(
-                "remember_count",
-                req.body.remember_count || "0"
-            );
-
-            form.append(
-                "understand_count",
-                req.body.understand_count || "0"
-            );
-
-            form.append(
-                "apply_count",
-                req.body.apply_count || "0"
-            );
-
-            form.append(
-                "analyze_count",
-                req.body.analyze_count || "0"
-            );
-
-            form.append(
-                "evaluate_count",
-                req.body.evaluate_count || "0"
-            );
-
-            form.append(
-                "create_count",
-                req.body.create_count || "0"
-            );
-
-            // Send request to FastAPI
             const response = await axios.post(
-                `${process.env.AI_SERVICE_URL}/api/generate-questions`,
+                `${AI_URL}/api/analyze-material`,
                 form,
                 {
-                    headers: {
-                        ...form.getHeaders()
-                    },
+                    headers: form.getHeaders(),
+                    maxBodyLength: Infinity,
                     maxContentLength: Infinity,
-                    maxBodyLength: Infinity
+                    timeout: 600000
                 }
             );
-
-            // Delete temporary uploaded PDF
-            if (
-                req.file &&
-                fs.existsSync(req.file.path)
-            ) {
-                fs.unlinkSync(req.file.path);
-            }
-
-            res.json(response.data);
-
+            res.status(response.status).json(response.data);
         } catch (error) {
-
-            console.error(
-                "Question generation error:",
-                error.response?.data ||
-                error.message
-            );
-
-            // Always delete temporary PDF
-            if (
-                req.file &&
-                fs.existsSync(req.file.path)
-            ) {
-                fs.unlinkSync(req.file.path);
-            }
-
-            res.status(
-                error.response?.status || 500
-            ).json({
-
-                message: "Question generation failed",
-
-                error:
-                    error.response?.data ||
-                    error.message
-            });
+            sendUpstreamError(res, error, "Material analysis failed.");
+        } finally {
+            cleanup(files);
         }
     }
 );
 
-// ======================================
-// Start Server
-// ======================================
+// STEP 2: local page search + AI evidence assessment.
+app.post("/api/search-concept", async (req, res) => {
+    try {
+        const response = await axios.post(
+            `${AI_URL}/api/search-concept`,
+            req.body,
+            { timeout: 180000 }
+        );
+        res.status(response.status).json(response.data);
+    } catch (error) {
+        sendUpstreamError(res, error, "Concept evidence search failed.");
+    }
+});
 
-const PORT = process.env.PORT || 5000;
+app.post("/api/add-concept", async (req, res) => {
+    try {
+        const response = await axios.post(
+            `${AI_URL}/api/add-concept`,
+            req.body,
+            { timeout: 30000 }
+        );
+        res.status(response.status).json(response.data);
+    } catch (error) {
+        sendUpstreamError(res, error, "Could not add the concept.");
+    }
+});
+
+// STEP 3: generate from selected concepts and cached source material.
+app.post("/api/generate-questions", async (req, res) => {
+    try {
+        const response = await axios.post(
+            `${AI_URL}/api/generate-questions`,
+            req.body,
+            { timeout: 600000 }
+        );
+        res.status(response.status).json(response.data);
+    } catch (error) {
+        sendUpstreamError(res, error, "Question generation failed.");
+    }
+});
+
+// STEP 3: targeted question retry. No PDF upload.
+app.post("/api/retry-question", async (req, res) => {
+    try {
+        const response = await axios.post(
+            `${AI_URL}/api/retry-question`,
+            req.body,
+            { timeout: 300000 }
+        );
+        res.status(response.status).json(response.data);
+    } catch (error) {
+        sendUpstreamError(res, error, "Question retry failed.");
+    }
+});
+
+// STEP 3: one whole-paper retry. Uses cached material.
+app.post("/api/retry-paper", async (req, res) => {
+    try {
+        const response = await axios.post(
+            `${AI_URL}/api/retry-paper`,
+            req.body,
+            { timeout: 600000 }
+        );
+        res.status(response.status).json(response.data);
+    } catch (error) {
+        sendUpstreamError(res, error, "Paper retry failed.");
+    }
+});
+
+// STEP 4: existing Google Forms deployment route retained.
+app.post("/api/deploy-google-form", async (req, res) => {
+    try {
+        const response = await axios.post(
+            `${AI_URL}/api/deploy-google-form`,
+            req.body,
+            { headers: { "Content-Type": "application/json" }, timeout: 120000 }
+        );
+        res.json(response.data);
+    } catch (error) {
+        sendUpstreamError(res, error, "Google Form deployment failed.");
+    }
+});
+
+app.use((error, req, res, next) => {
+    if (error instanceof multer.MulterError) {
+        const message = error.code === "LIMIT_FILE_SIZE"
+            ? "Each PDF must be 25 MB or smaller."
+            : error.code === "LIMIT_FILE_COUNT"
+                ? `Maximum ${MAX_FILES} PDF files allowed.`
+                : error.message;
+
+        return res.status(400).json({
+            success: false,
+            message
+        });
+    }
+
+    if (error.message === "Please upload PDF files only.") {
+        return res.status(400).json({
+            success: false,
+            message: error.message
+        });
+    }
+
+    console.error("Backend error:", error);
+    res.status(500).json({
+        success: false,
+        message: "An unexpected backend error occurred.",
+        detail: error.message
+    });
+});
+
+app.get("/api/generation/:generationId", async (req, res) => {
+    try {
+        const response = await axios.get(
+            `${AI_URL}/api/generation/${encodeURIComponent(req.params.generationId)}`,
+            { timeout: 15000 }
+        );
+        res.status(response.status).json(response.data);
+    } catch (error) {
+        sendUpstreamError(res, error, "Could not load the saved generation.");
+    }
+});
 
 app.listen(PORT, () => {
-
-    console.log(
-        `Server running on http://localhost:${PORT}`
-    );
-
+    console.log(`Backend running at http://localhost:${PORT}`);
 });

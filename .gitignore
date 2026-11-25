@@ -38,3 +38,13 @@ logs/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Temporary Agentic Exam System data
+**/data/
+
+# Google OAuth tokens and credentials
+**/token*.json
+**/credentials.json
+
+**/data/
+**/token*.json

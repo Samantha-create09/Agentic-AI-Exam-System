@@ -1,203 +1,224 @@
+
+import re
 from services.llm_service import LLMService
 
 
+QUESTION_TYPES = [
+    "MCQ", "TRUE_FALSE", "STATEMENT_MCQ", "FILL_BLANK", "SHORT_ANSWER"
+]
+BLOOM_LEVELS = [
+    "Remember", "Understand", "Apply", "Analyze", "Evaluate", "Create"
+]
+STATEMENT_OPTIONS = [
+    "Both statements are true.",
+    "Both statements are false.",
+    "Statement I is true, but Statement II is false.",
+    "Statement I is false, but Statement II is true."
+]
+
+
 class QuestionAgent:
+    BATCH_CHARS = 12000
 
     def __init__(self):
         self.llm = LLMService()
 
+    def _split(self, text):
+        if not text or not text.strip():
+            raise ValueError("No selected source material was supplied.")
+
+        pages = re.split(
+            r"(?=---\s*(?:File:.*?\|\s*)?Page\s+\d+\s*---)",
+            text,
+            flags=re.IGNORECASE
+        )
+        chunks, current = [], ""
+
+        for page in pages:
+            page = page.strip()
+            if not page:
+                continue
+
+            if len(page) > self.BATCH_CHARS:
+                if current:
+                    chunks.append(current)
+                    current = ""
+                for start in range(0, len(page), self.BATCH_CHARS):
+                    chunks.append(page[start:start + self.BATCH_CHARS])
+                continue
+
+            if current and len(current) + len(page) > self.BATCH_CHARS:
+                chunks.append(current)
+                current = page
+            else:
+                current = (current + "\n\n" + page).strip()
+
+        if current:
+            chunks.append(current)
+
+        return chunks
+
+    @staticmethod
+    def _allocate(total, capacities):
+        result = [0] * len(capacities)
+        if total == 0:
+            return result
+        total_capacity = sum(capacities)
+        if total_capacity == 0:
+            raise ValueError("No capacity available for requested questions.")
+
+        remaining = total
+        for i, capacity in enumerate(capacities):
+            amount = min(remaining, capacity)
+            result[i] = amount
+            remaining -= amount
+            if remaining == 0:
+                break
+        if remaining:
+            raise ValueError("Could not allocate requested questions.")
+        return result
+
+    @staticmethod
+    def _normalise(question):
+        q = dict(question)
+        q["marks"] = 1
+        q["type"] = str(q.get("type", "")).upper().replace("-", "_").replace(" ", "_")
+
+        if q["type"] == "TRUE_FALSE":
+            q["options"] = ["True", "False"]
+            q["correctAnswer"] = str(q.get("correctAnswer", "")).capitalize()
+            if q["correctAnswer"] not in ("True", "False"):
+                raise ValueError("True/False answer must be True or False.")
+
+        elif q["type"] == "STATEMENT_MCQ":
+            q["options"] = STATEMENT_OPTIONS.copy()
+
+        elif q["type"] == "MCQ":
+            options = q.get("options") or []
+            if len(options) != 4 or len({x.strip().casefold() for x in options}) != 4:
+                raise ValueError("Every MCQ must have exactly four distinct options.")
+            q["options"] = options
+
+        elif q["type"] in ("FILL_BLANK", "SHORT_ANSWER"):
+            accepted = q.get("acceptedAnswers") or []
+            if isinstance(accepted, str):
+                accepted = [accepted]
+            answer = q.get("correctAnswer", "")
+            if answer and answer not in accepted:
+                accepted.insert(0, answer)
+            if not accepted:
+                raise ValueError(f"{q['type']} needs an accepted answer.")
+            q["acceptedAnswers"] = accepted
+
+        if q["type"] not in QUESTION_TYPES:
+            raise ValueError(f"Unsupported question type: {q['type']}")
+        if q.get("bloomLevel") not in BLOOM_LEVELS:
+            raise ValueError("Generated question has an invalid Bloom level.")
+        if not str(q.get("question", "")).strip():
+            raise ValueError("Generated question text is empty.")
+        q.setdefault("explanation", "")
+        q.setdefault("concept", "Selected concept")
+        return q
+
+    @staticmethod
+    def _allocate_with_capacity(total, remaining_capacity):
+        allocation = [0] * len(remaining_capacity)
+        remaining = total
+
+        for index, capacity in enumerate(remaining_capacity):
+            amount = min(remaining, capacity)
+            allocation[index] = amount
+            remaining_capacity[index] -= amount
+            remaining -= amount
+
+            if remaining == 0:
+                break
+
+        if remaining:
+            raise ValueError("Could not allocate the requested distribution.")
+
+        return allocation
+
     def generate_questions(
         self,
         text,
-        mcq_count,
-        true_false_count,
-        fill_blank_count,
-        short_answer_count,
-        difficulty,
-        bloom_distribution,
-        concept_graph=None
+        mcq_count=0,
+        true_false_count=0,
+        fill_blank_count=0,
+        short_answer_count=0,
+        difficulty="Medium",
+        bloom_distribution=None,
+        concept_graph=None,
+        statement_mcq_count=0,
+        retry_reason=""
     ):
+        type_counts = {
+            "MCQ": int(mcq_count),
+            "TRUE_FALSE": int(true_false_count),
+            "STATEMENT_MCQ": int(statement_mcq_count),
+            "FILL_BLANK": int(fill_blank_count),
+            "SHORT_ANSWER": int(short_answer_count)
+        }
+        if any(v < 0 for v in type_counts.values()):
+            raise ValueError("Question counts cannot be negative.")
 
-        total_questions = (
-            mcq_count
-            + true_false_count
-            + fill_blank_count
-            + short_answer_count
+        total = sum(type_counts.values())
+        bloom = {
+            level: int((bloom_distribution or {}).get(level, 0))
+            for level in BLOOM_LEVELS
+        }
+
+        if total < 1 or sum(bloom.values()) != total:
+            raise ValueError("Bloom distribution must equal total question count.")
+        if any(v < 0 for v in bloom.values()):
+            raise ValueError("Bloom counts cannot be negative.")
+        if difficulty not in ("Low", "Medium", "High"):
+            raise ValueError("Invalid difficulty.")
+
+        chunks = self._split(text)
+
+        weights = [max(1, len(chunk)) for chunk in chunks]
+        total_weight = sum(weights)
+
+        raw_allocations = [
+            total * weight / total_weight
+            for weight in weights
+        ]
+
+        capacities = [
+            int(value)
+            for value in raw_allocations
+        ]
+
+        remaining = total - sum(capacities)
+
+        fractional_order = sorted(
+            range(len(raw_allocations)),
+            key=lambda index: raw_allocations[index] - capacities[index],
+            reverse=True
         )
 
-        instructions = """
-You are Agent 2 of an academic examination system.
-
-Your task is to generate high-quality objective
-examination questions strictly from the supplied
-study material.
-
-You MUST follow every rule below.
-
-1. Do not invent facts that are not supported by
-   the study material.
-
-2. Questions must be academically meaningful.
-
-3. Questions must be clear and grammatically correct.
-
-4. Avoid duplicate questions.
-
-5. Avoid ambiguous questions.
-
-6. MCQs must have exactly four options.
-
-7. MCQs must have exactly one correct answer.
-
-8. True/False questions must use exactly:
-   True
-   False
-
-9. Fill-in-the-blank questions must have accepted answers.
-
-10. Short factual answer questions must have a concise
-    expected answer and accepted answers.
-
-11. Follow the requested difficulty exactly.
-
-12. Generate exactly the requested number of questions
-    for each question type.
-
-13. Generate exactly the requested total number of questions.
-
-14. Generate exactly the requested number of questions
-    for EACH Bloom level.
-
-15. DO NOT change the Bloom distribution.
-
-16. Every question must contain its Bloom level.
-
-17. Every question must contain the concept being tested.
-
-18. Every question must contain an explanation.
-
-19. EVERY question MUST have exactly 1 mark.
-
-20. Never generate 2 marks, 3 marks, or any other mark value.
-
-21. Do not include Markdown.
-
-22. Return only the requested JSON structure.
-
-The Bloom distribution is a HARD requirement.
-
-For example:
-
-Remember: 2
-Understand: 2
-Apply: 1
-Analyze: 1
-Evaluate: 0
-Create: 0
-
-You MUST generate:
-
-2 Remember questions
-2 Understand questions
-1 Apply question
-1 Analyze question
-0 Evaluate questions
-0 Create questions
-
-Do not change these numbers.
-
-The question-type distribution is also a HARD requirement.
-
-If the requested distribution is:
-
-MCQ: 4
-TRUE_FALSE: 2
-FILL_BLANK: 2
-SHORT_ANSWER: 2
-
-then generate exactly:
-
-4 MCQs
-2 True/False questions
-2 Fill-in-the-blank questions
-2 Short factual answer questions
-
-Every question must have exactly 1 mark.
-"""
-
-        concept_information = ""
-
-        if concept_graph:
-
-            concept_information = f"""
-CONCEPT GRAPH CREATED BY AGENT 1:
-
-{concept_graph}
-
-Use this concept information when selecting
-important concepts for the questions.
-
-Do not invent relationships or concepts that
-are not supported by the study material.
-"""
-
-        user_prompt = f"""
-Generate exactly {total_questions} questions.
-
-QUESTION TYPE DISTRIBUTION:
-
-MCQ:
-{mcq_count}
-
-TRUE_FALSE:
-{true_false_count}
-
-FILL_BLANK:
-{fill_blank_count}
-
-SHORT_ANSWER:
-{short_answer_count}
-
-
-DIFFICULTY:
-
-{difficulty}
-
-
-EXACT BLOOM DISTRIBUTION:
-
-Remember: {bloom_distribution.get("Remember", 0)}
-
-Understand: {bloom_distribution.get("Understand", 0)}
-
-Apply: {bloom_distribution.get("Apply", 0)}
-
-Analyze: {bloom_distribution.get("Analyze", 0)}
-
-Evaluate: {bloom_distribution.get("Evaluate", 0)}
-
-Create: {bloom_distribution.get("Create", 0)}
-
-
-IMPORTANT:
-
-Every question must have:
-
-marks = 1
-
-The total number of questions must be:
-
-{total_questions}
-
-
-{concept_information}
-
-
-STUDY MATERIAL:
-
-{text}
-"""
-
+        for index in fractional_order[:remaining]:
+            capacities[index] += 1
+
+        type_allocations = {}
+        type_capacity = capacities.copy()
+
+        for question_type in QUESTION_TYPES:
+            type_allocations[question_type] = self._allocate_with_capacity(
+                type_counts[question_type],
+                type_capacity
+            )
+
+        bloom_allocations = {}
+        bloom_capacity = capacities.copy()
+
+        for level in BLOOM_LEVELS:
+            bloom_allocations[level] = self._allocate_with_capacity(
+                bloom[level],
+                bloom_capacity
+            )
+            
         schema = {
             "type": "object",
             "properties": {
@@ -206,119 +227,128 @@ STUDY MATERIAL:
                     "items": {
                         "type": "object",
                         "properties": {
-
-                            "question": {
-                                "type": "string"
-                            },
-
-                            "type": {
-                                "type": "string",
-                                "enum": [
-                                    "MCQ",
-                                    "TRUE_FALSE",
-                                    "FILL_BLANK",
-                                    "SHORT_ANSWER"
-                                ]
-                            },
-
-                            "options": {
-                                "type": "array",
-                                "items": {
-                                    "type": "string"
-                                }
-                            },
-
-                            "correctAnswer": {
-                                "type": "string"
-                            },
-
-                            "acceptedAnswers": {
-                                "type": "array",
-                                "items": {
-                                    "type": "string"
-                                }
-                            },
-
-                            "marks": {
-                                "type": "integer"
-                            },
-
-                            "bloomLevel": {
-                                "type": "string",
-                                "enum": [
-                                    "Remember",
-                                    "Understand",
-                                    "Apply",
-                                    "Analyze",
-                                    "Evaluate",
-                                    "Create"
-                                ]
-                            },
-
-                            "difficulty": {
-                                "type": "string",
-                                "enum": [
-                                    "Low",
-                                    "Medium",
-                                    "High"
-                                ]
-                            },
-
-                            "concept": {
-                                "type": "string"
-                            },
-
-                            "explanation": {
-                                "type": "string"
-                            }
+                            "question": {"type": "string"},
+                            "type": {"type": "string", "enum": QUESTION_TYPES},
+                            "options": {"type": "array", "items": {"type": "string"}},
+                            "correctAnswer": {"type": "string"},
+                            "acceptedAnswers": {"type": "array", "items": {"type": "string"}},
+                            "marks": {"type": "integer"},
+                            "bloomLevel": {"type": "string", "enum": BLOOM_LEVELS},
+                            "difficulty": {"type": "string", "enum": ["Low", "Medium", "High"]},
+                            "concept": {"type": "string"},
+                            "explanation": {"type": "string"}
                         },
-
                         "required": [
-                            "question",
-                            "type",
-                            "options",
-                            "correctAnswer",
-                            "acceptedAnswers",
-                            "marks",
-                            "bloomLevel",
-                            "difficulty",
-                            "concept",
-                            "explanation"
+                            "question", "type", "options", "correctAnswer",
+                            "acceptedAnswers", "marks", "bloomLevel",
+                            "difficulty", "concept", "explanation"
                         ]
                     }
                 }
             },
-
-            "required": [
-                "questions"
-            ]
+            "required": ["questions"]
         }
 
-        result = self.llm.generate_json(
-            instructions=instructions,
-            input_text=user_prompt,
-            schema_name="exam_questions",
-            schema=schema
-        )
+        instructions = """
+You are Agent 2. Generate examination questions ONLY from the supplied
+selected study-material batch. Do not use outside knowledge.
 
-        questions = result["questions"]
+Follow the exact requested question-type counts and Bloom counts.
+Every question is worth exactly 1 mark.
+MCQ: exactly four distinct options and one correct answer.
+TRUE_FALSE: one statement, answer True or False.
+STATEMENT_MCQ: two statements and the four standard truth-combination options.
+FILL_BLANK: meaningful blank plus correctAnswer and acceptedAnswers.
+SHORT_ANSWER: focused answerable question plus correctAnswer and acceptedAnswers.
+Avoid duplicates. Return JSON only.
+"""
 
-        # ======================================
-        # System-level enforcement
-        # ======================================
+        all_questions = []
+        for index, chunk in enumerate(chunks):
+            batch_total = capacities[index]
+            if batch_total == 0:
+                # The chunk was considered in allocation but doesn't need
+                # a separate generation call because no questions were assigned.
+                continue
 
-        # Every question is exactly 1 mark.
-        for question in questions:
-            question["marks"] = 1
+            requested_types = {
+                t: type_allocations[t][index] for t in QUESTION_TYPES
+            }
+            requested_bloom = {
+                level: bloom_allocations[level][index] for level in BLOOM_LEVELS
+            }
 
-        # Force True/False options
-        for question in questions:
+            result = self.llm.generate_json(
+                instructions=instructions,
+                input_text=(
+                    f"DIFFICULTY: {difficulty}\n"
+                    f"EXACT TYPE COUNTS: {requested_types}\n"
+                    f"EXACT BLOOM COUNTS: {requested_bloom}\n"
+                    f"TEACHER FEEDBACK: {retry_reason}\n"
+                    f"CONCEPT CONTEXT: {concept_graph or {}}\n\n"
+                    f"SOURCE BATCH {index + 1}/{len(chunks)}:\n{chunk}"
+                ),
+                schema_name="exam_questions",
+                schema=schema
+            )
 
-            if question["type"] == "TRUE_FALSE":
+            generated = result.get("questions", [])
+            if len(generated) != batch_total:
+                raise ValueError(
+                    f"Batch {index + 1} returned {len(generated)} questions; "
+                    f"{batch_total} were requested. No automatic regeneration "
+                    "was performed, to avoid wasting API quota."
+                )
 
-                question["options"] = [
-                    "True",
-                    "False"
-                ]
+            source_files = set()
+            source_pages = set()
 
-        return questions
+            for match in re.finditer(
+                r"---\s*(?:File:\s*(.*?)\s*\|\s*)?Page\s+(\d+)\s*---",
+                chunk
+            ):
+                source_files.add(
+                    (match.group(1) or "Uploaded material").strip()
+                )
+                source_pages.add(int(match.group(2)))
+
+            for raw_question in generated:
+                question = self._normalise(raw_question)
+                question["source"] = {
+                    "files": sorted(source_files),
+                    "pages": sorted(source_pages)
+                }
+                all_questions.append(question)
+
+        # Exact combined distribution validation.
+        if len(all_questions) != total:
+            raise ValueError(
+                f"Expected {total} questions, received {len(all_questions)}."
+            )
+
+        actual_types = {
+            t: sum(q["type"] == t for q in all_questions)
+            for t in QUESTION_TYPES
+        }
+        actual_bloom = {
+            level: sum(q["bloomLevel"] == level for q in all_questions)
+            for level in BLOOM_LEVELS
+        }
+
+        if actual_types != type_counts:
+            raise ValueError(f"Question-type mismatch: {actual_types}")
+        if actual_bloom != bloom:
+            raise ValueError(f"Bloom distribution mismatch: {actual_bloom}")
+
+        seen = set()
+        for q in all_questions:
+            key = re.sub(r"\s+", " ", q["question"].casefold()).strip()
+            if key in seen:
+                raise ValueError("Duplicate questions were generated. Review the source or request fewer questions.")
+            seen.add(key)
+
+        for number, q in enumerate(all_questions, 1):
+            q["number"] = number
+            q["marks"] = 1
+
+        return all_questions
