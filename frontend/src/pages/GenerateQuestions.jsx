@@ -1,6 +1,7 @@
-
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import Sidebar from "../components/Sidebar";
+import WorkflowStepper from "../components/WorkflowStepper";
 
 const API_URL = "http://localhost:5000";
 
@@ -29,7 +30,7 @@ const initial = {
     short_answer_count: 0,
     difficulty: "Medium",
     remember_count: 1,
-    understand_count: 1,
+    understand_count: 2,
     apply_count: 1,
     analyze_count: 1,
     evaluate_count: 0,
@@ -57,6 +58,7 @@ export default function GenerateQuestions() {
     const [values, setValues] = useState(initial);
     const [title, setTitle] = useState(sessionStorage.getItem("examTitle") || "");
     const [subject, setSubject] = useState(sessionStorage.getItem("examSubject") || "");
+    const [dragging, setDragging] = useState(false);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
 
@@ -73,12 +75,11 @@ export default function GenerateQuestions() {
         setValues(current => ({ ...current, [key]: value }));
     }
 
-    function selectFiles(event) {
+    function processFiles(chosenList) {
         setError("");
-        const chosen = Array.from(event.target.files || []);
         const merged = [...files];
 
-        for (const file of chosen) {
+        for (const file of chosenList) {
             if (!file.name.toLowerCase().endsWith(".pdf")) {
                 setError(`${file.name} is not a PDF.`);
                 return;
@@ -101,7 +102,17 @@ export default function GenerateQuestions() {
             return;
         }
         setFiles(merged);
+    }
+
+    function selectFiles(event) {
+        processFiles(Array.from(event.target.files || []));
         event.target.value = "";
+    }
+
+    function handleDrop(event) {
+        event.preventDefault();
+        setDragging(false);
+        processFiles(Array.from(event.dataTransfer?.files || []));
     }
 
     async function analyse(event) {
@@ -146,104 +157,229 @@ export default function GenerateQuestions() {
     }
 
     return (
-        <div className="workflow-page generate-page">
-            <header className="workflow-header">
-                <div>
-                    <p className="eyebrow">Agentic AI Exam System</p>
-                    <h1>Create Examination</h1>
-                    <p>Step 1 of 4 — Upload material and configure your paper</p>
+        <div className="app-layout">
+            <Sidebar />
+
+            <main className="main-content">
+                <div className="topbar">
+                    <div className="topbar-title">Create Exam</div>
+
+                    <div className="user-area">
+                        <strong>Teacher</strong>
+                        <div className="avatar">T</div>
+                    </div>
                 </div>
-            </header>
 
-            <main className="workflow-card">
-                <form onSubmit={analyse}>
-                    <section>
-                        <h2>Exam details</h2>
-                        <div className="form-grid">
-                            <label>
-                                Exam title
-                                <input value={title} onChange={e => setTitle(e.target.value)} required />
-                            </label>
-                            <label>
-                                Subject
-                                <input value={subject} onChange={e => setSubject(e.target.value)} />
-                            </label>
-                        </div>
-                    </section>
+                <div className="content">
+                    <WorkflowStepper currentStep={1} />
 
-                    <section>
-                        <h2>Study material</h2>
-                        <label className="file-field upload-dropzone">
-                            <strong>Choose PDF files</strong>
-                            <span>PDF only · Maximum 5 files · 25 MB each · 100 MB combined</span>
-                            <input type="file" accept=".pdf,application/pdf" multiple onChange={selectFiles} />
-                        </label>
-
-                        {files.map((file, index) => (
-                            <div className="selected-file" key={`${file.name}-${index}`}>
-                                <span>{file.name} · {(file.size / 1048576).toFixed(2)} MB</span>
-                                <button type="button" className="secondary-button"
-                                    onClick={() => setFiles(current => current.filter((_, i) => i !== index))}>
-                                    Remove
-                                </button>
+                    <div className="workflow-page generate-page">
+                        <header className="workflow-header">
+                            <div>
+                                <p className="eyebrow">Step 1 of 4</p>
+                                <h1>Configure &amp; Upload Material</h1>
+                                <p className="workflow-step">
+                                    Provide exam metadata, upload course PDFs, and set your question blueprint.
+                                </p>
                             </div>
-                        ))}
-                    </section>
+                        </header>
 
-                    <section>
-                        <h2>Question types</h2>
-                        <div className="count-grid">
-                            {typeFields.map(([key, label]) => (
-                                <label key={key}>
-                                    {label}
-                                    <select value={values[key]}
-                                        onChange={e => update(key, Number(e.target.value))}>
-                                        {Array.from({ length: 51 }, (_, n) =>
-                                            <option value={n} key={n}>{n}</option>
-                                        )}
-                                    </select>
-                                </label>
-                            ))}
+                        <div className="workflow-card">
+                            <form onSubmit={analyse}>
+                                <section>
+                                    <div className="section-title-row">
+                                        <span className="section-number">01</span>
+                                        <h2>Exam details</h2>
+                                    </div>
+                                    <div className="form-grid">
+                                        <label>
+                                            Exam title
+                                            <input
+                                                placeholder="e.g. Unit 3 Middleware Assessment"
+                                                value={title}
+                                                onChange={e => setTitle(e.target.value)}
+                                                required
+                                            />
+                                        </label>
+                                        <label>
+                                            Subject
+                                            <input
+                                                placeholder="e.g. Distributed Computing"
+                                                value={subject}
+                                                onChange={e => setSubject(e.target.value)}
+                                            />
+                                        </label>
+                                    </div>
+                                </section>
+
+                                <section>
+                                    <div className="section-title-row">
+                                        <span className="section-number">02</span>
+                                        <h2>Study material</h2>
+                                    </div>
+
+                                    <label
+                                        className={`upload-dropzone${dragging ? " dragging" : ""}`}
+                                        onDragOver={e => {
+                                            e.preventDefault();
+                                            setDragging(true);
+                                        }}
+                                        onDragLeave={() => setDragging(false)}
+                                        onDrop={handleDrop}
+                                    >
+                                        <span className="upload-dropzone-icon" aria-hidden="true">
+                                            <svg
+                                                width="22"
+                                                height="22"
+                                                viewBox="0 0 24 24"
+                                                fill="none"
+                                                stroke="currentColor"
+                                                strokeWidth="1.75"
+                                                strokeLinecap="round"
+                                                strokeLinejoin="round"
+                                            >
+                                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                                <polyline points="17 8 12 3 7 8" />
+                                                <line x1="12" y1="3" x2="12" y2="15" />
+                                            </svg>
+                                        </span>
+                                        <strong>Drop PDF files here or click to browse</strong>
+                                        <span>PDF only · Maximum 5 files · 25 MB each · 100 MB combined</span>
+                                        <input
+                                            type="file"
+                                            accept=".pdf,application/pdf"
+                                            multiple
+                                            onChange={selectFiles}
+                                        />
+                                    </label>
+
+                                    {files.map((file, index) => (
+                                        <div className="selected-file" key={`${file.name}-${index}`}>
+                                            <div className="selected-file-meta">
+                                                <svg
+                                                    width="18"
+                                                    height="18"
+                                                    viewBox="0 0 24 24"
+                                                    fill="none"
+                                                    stroke="#3B49DF"
+                                                    strokeWidth="1.75"
+                                                    strokeLinecap="round"
+                                                    strokeLinejoin="round"
+                                                    aria-hidden="true"
+                                                >
+                                                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                                    <polyline points="14 2 14 8 20 8" />
+                                                </svg>
+                                                <span>
+                                                    {file.name} · {(file.size / 1048576).toFixed(2)} MB
+                                                </span>
+                                            </div>
+                                            <button
+                                                type="button"
+                                                className="secondary-button"
+                                                onClick={() =>
+                                                    setFiles(current => current.filter((_, i) => i !== index))
+                                                }
+                                            >
+                                                Remove
+                                            </button>
+                                        </div>
+                                    ))}
+                                </section>
+
+                                <section>
+                                    <div className="section-title-row">
+                                        <span className="section-number">03</span>
+                                        <h2>Question types</h2>
+                                    </div>
+                                    <div className="count-grid">
+                                        {typeFields.map(([key, label]) => (
+                                            <label key={key}>
+                                                {label}
+                                                <select
+                                                    value={values[key]}
+                                                    onChange={e => update(key, Number(e.target.value))}
+                                                >
+                                                    {Array.from({ length: 51 }, (_, n) => (
+                                                        <option value={n} key={n}>
+                                                            {n}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                            </label>
+                                        ))}
+                                    </div>
+                                    <div className="total-line">
+                                        <span>Total questions (1 mark each)</span>
+                                        <strong>{totalQuestions}</strong>
+                                    </div>
+                                </section>
+
+                                <section>
+                                    <div className="section-title-row">
+                                        <span className="section-number">04</span>
+                                        <h2>Difficulty</h2>
+                                    </div>
+                                    <div className="form-grid">
+                                        <label>
+                                            Target difficulty level
+                                            <select
+                                                value={values.difficulty}
+                                                onChange={e => update("difficulty", e.target.value)}
+                                            >
+                                                <option>Low</option>
+                                                <option>Medium</option>
+                                                <option>High</option>
+                                            </select>
+                                        </label>
+                                    </div>
+                                </section>
+
+                                <section>
+                                    <div className="section-title-row">
+                                        <span className="section-number">05</span>
+                                        <h2>Bloom&apos;s Taxonomy distribution</h2>
+                                    </div>
+                                    <div className="count-grid bloom-grid">
+                                        {bloomFields.map(([key, label]) => (
+                                            <label key={key}>
+                                                {label}
+                                                <select
+                                                    value={values[key]}
+                                                    onChange={e => update(key, Number(e.target.value))}
+                                                >
+                                                    {Array.from({ length: 51 }, (_, n) => (
+                                                        <option value={n} key={n}>
+                                                            {n}
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                            </label>
+                                        ))}
+                                    </div>
+                                    <div className={totalBloom === totalQuestions ? "match-badge" : "field-error"}>
+                                        Bloom total: {totalBloom} / {totalQuestions}
+                                    </div>
+                                </section>
+
+                                {error && (
+                                    <div className="error-box" role="alert">
+                                        {error}
+                                    </div>
+                                )}
+
+                                <div className="workflow-actions">
+                                    <span />
+                                    <button className="primary-button" type="submit" disabled={loading}>
+                                        {loading
+                                            ? "Analysing uploaded material..."
+                                            : "Analyse material and continue"}
+                                    </button>
+                                </div>
+                            </form>
                         </div>
-                        <p className="total-line">Total questions: <strong>{totalQuestions}</strong></p>
-                    </section>
-
-                    <section>
-                        <h2>Difficulty</h2>
-                        <select value={values.difficulty}
-                            onChange={e => update("difficulty", e.target.value)}>
-                            <option>Low</option>
-                            <option>Medium</option>
-                            <option>High</option>
-                        </select>
-                    </section>
-
-                    <section>
-                        <h2>Bloom's Taxonomy distribution</h2>
-                        <div className="count-grid bloom-grid">
-                            {bloomFields.map(([key, label]) => (
-                                <label key={key}>
-                                    {label}
-                                    <select value={values[key]}
-                                        onChange={e => update(key, Number(e.target.value))}>
-                                        {Array.from({ length: 51 }, (_, n) =>
-                                            <option value={n} key={n}>{n}</option>
-                                        )}
-                                    </select>
-                                </label>
-                            ))}
-                        </div>
-                        <p className={totalBloom === totalQuestions ? "match-badge" : "field-error"}>
-                            Bloom total: {totalBloom} / {totalQuestions}
-                        </p>
-                    </section>
-
-                    {error && <div className="error-box" role="alert">{error}</div>}
-
-                    <button className="primary-button" type="submit" disabled={loading}>
-                        {loading ? "Analysing all uploaded pages..." : "Analyse material and continue"}
-                    </button>
-                </form>
+                    </div>
+                </div>
             </main>
         </div>
     );

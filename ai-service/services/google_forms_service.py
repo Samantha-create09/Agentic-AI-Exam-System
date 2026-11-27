@@ -5,6 +5,7 @@ import time
 import requests
 
 from dotenv import load_dotenv
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -65,6 +66,16 @@ class GoogleFormsService:
                 )
             )
 
+            if (
+                credentials
+                and credentials.scopes is not None
+                and not set(self.SCOPES).issubset(set(credentials.scopes))
+            ):
+                raise RuntimeError(
+                    "Google OAuth token in ai-service/token.json is missing the required "
+                    "Google Forms scope (https://www.googleapis.com/auth/forms.body). "
+                    "Re-authorize Google Forms permissions to update ai-service/token.json."
+                )
 
         if (
             not credentials
@@ -77,8 +88,23 @@ class GoogleFormsService:
                 and credentials.refresh_token
             ):
 
-                credentials.refresh(
-                    Request()
+                try:
+                    credentials.refresh(
+                        Request()
+                    )
+                except RefreshError as exc:
+                    raise RuntimeError(
+                        "Google OAuth token in ai-service/token.json has expired or been "
+                        "revoked (invalid_grant). Re-authorize your Google account to "
+                        "generate a fresh ai-service/token.json before deploying."
+                    ) from exc
+
+            elif os.path.exists(self.token_file):
+
+                raise RuntimeError(
+                    "Google OAuth token in ai-service/token.json is invalid and cannot be "
+                    "refreshed automatically. Re-authorize your Google account to update "
+                    "ai-service/token.json."
                 )
 
             else:
@@ -102,7 +128,9 @@ class GoogleFormsService:
 
                 credentials = (
                     flow.run_local_server(
-                        port=0
+                        port=0,
+                        access_type="offline",
+                        prompt="consent",
                     )
                 )
 
@@ -138,9 +166,16 @@ class GoogleFormsService:
                 and self.credentials.refresh_token
             ):
 
-                self.credentials.refresh(
-                    Request()
-                )
+                try:
+                    self.credentials.refresh(
+                        Request()
+                    )
+                except RefreshError as exc:
+                    raise RuntimeError(
+                        "Google OAuth token in ai-service/token.json has expired or been "
+                        "revoked (invalid_grant). Re-authorize your Google account to "
+                        "generate a fresh ai-service/token.json before deploying."
+                    ) from exc
 
                 with open(
                     self.token_file,
@@ -304,8 +339,9 @@ class GoogleFormsService:
     def _build_question_item(self, question):
 
 
-        question_text = str(
-            question.get("question", "")
+        # Google Forms API item titles cannot contain newline characters.
+        question_text = " ".join(
+            str(question.get("question", "")).splitlines()
         ).strip()
 
         question_type = str(
@@ -388,12 +424,14 @@ class GoogleFormsService:
             "STATEMENT_MCQ"
         ]:
 
-            options = question.get("options", [])
+            raw_options = question.get("options", [])
 
-            if not isinstance(options, list):
+            if not isinstance(raw_options, list):
                 raise ValueError(
                     f"{question_type} options must be a list."
                 )
+
+            options = [str(opt).strip() for opt in raw_options]
 
             if len(options) != 4:
                 raise ValueError(
@@ -459,10 +497,18 @@ class GoogleFormsService:
 
         if question_type == "TRUE_FALSE":
 
-            if correct_answer not in ["True", "False"]:
+            normalized_tf = correct_answer.strip().rstrip(".").capitalize()
+            if normalized_tf not in ["True", "False"]:
                 raise ValueError(
                     "True/False answer must be True or False."
                 )
+
+            tf_grading = {
+                "pointValue": marks,
+                "correctAnswers": {
+                    "answers": [{"value": normalized_tf}]
+                }
+            }
 
             return {
                 "item": {
@@ -470,7 +516,7 @@ class GoogleFormsService:
                     "questionItem": {
                         "question": {
                             "required": True,
-                            "grading": grading,
+                            "grading": tf_grading,
                             "choiceQuestion": {
                                 "type": "RADIO",
                                 "options": [

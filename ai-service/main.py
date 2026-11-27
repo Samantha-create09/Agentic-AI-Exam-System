@@ -1,6 +1,9 @@
 
+import copy
+import hashlib
 import os
 import re
+import traceback
 import uuid
 import random
 from datetime import datetime, timedelta
@@ -159,11 +162,11 @@ def _save_uploads(uploaded_files):
     if len(uploaded_files) > MAX_FILES:
         raise HTTPException(400, f"Maximum {MAX_FILES} PDF files allowed.")
 
-    paths = []
+    uploads = []
     total = 0
     try:
         for file in uploaded_files:
-            name = file.filename or "upload.pdf"
+            name = os.path.basename(file.filename or "upload.pdf") or "upload.pdf"
             if not name.lower().endswith(".pdf"):
                 raise HTTPException(400, f"Only PDF files are allowed: {name}")
             content = file.file.read()
@@ -178,15 +181,16 @@ def _save_uploads(uploaded_files):
             path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex}.pdf")
             with open(path, "wb") as output:
                 output.write(content)
-            paths.append(path)
-        return paths
+            uploads.append({"path": path, "filename": name})
+        return uploads
     except Exception:
-        _cleanup(paths)
+        _cleanup(uploads)
         raise
 
 
-def _cleanup(paths):
-    for path in paths:
+def _cleanup(uploads):
+    for item in uploads:
+        path = item["path"] if isinstance(item, dict) else item
         try:
             if path and os.path.exists(path):
                 os.remove(path)
@@ -328,24 +332,55 @@ def test():
     return {"message": "FastAPI AI service is working"}
 
 
-# STEP 1: Upload, extract and analyse once.
+# STEP 1: Upload, extract and analyse once (with SHA-256 cache reuse).
 @app.post("/api/analyze-material")
 async def analyze_material(files: list[UploadFile] = File(...)):
-    paths = []
+    uploads = []
     try:
-        paths = _save_uploads(files)
+        uploads = _save_uploads(files)
         text, total_pages = extract_text_from_pdfs(
-            paths, max_pages=MAX_COMBINED_PAGES
+            uploads, max_pages=MAX_COMBINED_PAGES
         )
         if not text.strip():
             raise HTTPException(400, "No readable PDF text was extracted.")
 
+        source_files = [item["filename"] for item in uploads]
+        content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        cached_record = storage_service.find_cached_analysis(content_hash)
+
+        if cached_record is not None:
+            graph = copy.deepcopy(cached_record["concept_graph"])
+            cached_text = cached_record["extracted_text"]
+            cached_pages = cached_record.get("total_pdf_pages", total_pages)
+            cached_files = cached_record.get("source_files", source_files)
+            saved = storage_service.create_generation({
+                "content_hash": content_hash,
+                "extracted_text": cached_text,
+                "concept_graph": graph,
+                "total_pdf_pages": cached_pages,
+                "source_files": cached_files,
+                "questions": [],
+                "settings": {},
+                "selected_concept_ids": [],
+                "selected_subtopic_ids": []
+            })
+            return {
+                "success": True,
+                "cached": True,
+                "generation_id": saved["generation_id"],
+                "totalPdfPages": cached_pages,
+                "sourceFiles": saved["source_files"],
+                "conceptGraph": graph,
+                "message": "Loaded cached concept analysis for identical study material."
+            }
+
         graph = concept_agent.extract_concepts(text)
         saved = storage_service.create_generation({
+            "content_hash": content_hash,
             "extracted_text": text,
             "concept_graph": graph,
             "total_pdf_pages": total_pages,
-            "source_files": [f.filename for f in files],
+            "source_files": source_files,
             "questions": [],
             "settings": {},
             "selected_concept_ids": [],
@@ -353,6 +388,7 @@ async def analyze_material(files: list[UploadFile] = File(...)):
         })
         return {
             "success": True,
+            "cached": False,
             "generation_id": saved["generation_id"],
             "totalPdfPages": total_pages,
             "sourceFiles": saved["source_files"],
@@ -367,7 +403,7 @@ async def analyze_material(files: list[UploadFile] = File(...)):
         print("Material analysis error:", exc)
         raise HTTPException(500, str(exc))
     finally:
-        _cleanup(paths)
+        _cleanup(uploads)
 
 
 # STEP 2: Search cached material and assess evidence.
@@ -444,76 +480,87 @@ def add_concept(request: AddConceptRequest):
 # STEP 3: Generate from teacher-selected concepts only.
 @app.post("/api/generate-questions")
 def generate_questions(request: GenerateRequest):
-    record = _get_record(request.generation_id)
-    type_counts, bloom, total = _validate_counts(request)
+    try:
+        record = _get_record(request.generation_id)
+        type_counts, bloom, total = _validate_counts(request)
 
-    selected_text, concepts, pages, names = _selected_text(
-        record,
-        request.selected_concept_ids,
-        request.selected_subtopic_ids
-    )
+        selected_text, concepts, pages, names = _selected_text(
+            record,
+            request.selected_concept_ids,
+            request.selected_subtopic_ids
+        )
 
-    questions = question_agent.generate_questions(
-        text=selected_text,
-        mcq_count=type_counts["MCQ"],
-        true_false_count=type_counts["TRUE_FALSE"],
-        statement_mcq_count=type_counts["STATEMENT_MCQ"],
-        fill_blank_count=type_counts["FILL_BLANK"],
-        short_answer_count=type_counts["SHORT_ANSWER"],
-        difficulty=request.difficulty,
-        bloom_distribution=bloom,
-        concept_graph={"selected_concepts": names}
-    )
+        questions = question_agent.generate_questions(
+            text=selected_text,
+            mcq_count=type_counts["MCQ"],
+            true_false_count=type_counts["TRUE_FALSE"],
+            statement_mcq_count=type_counts["STATEMENT_MCQ"],
+            fill_blank_count=type_counts["FILL_BLANK"],
+            short_answer_count=type_counts["SHORT_ANSWER"],
+            difficulty=request.difficulty,
+            bloom_distribution=bloom,
+            concept_graph={"selected_concepts": names}
+        )
 
-    questions = _attach_sources(questions, names, pages)
-    random.shuffle(questions)
-    for number, question in enumerate(questions, 1):
-        question["number"] = number
+        questions = _attach_sources(questions, names, pages)
+        random.shuffle(questions)
+        for number, question in enumerate(questions, 1):
+            question["number"] = number
 
-    balance, validation = _run_quality_checks(questions, type_counts, bloom)
-    if not balance.get("valid") or not validation.get("valid"):
+        balance, validation = _run_quality_checks(questions, type_counts, bloom)
+        if not balance.get("valid") or not validation.get("valid"):
+            return {
+                "success": False,
+                "generation_id": request.generation_id,
+                "message": "Generated questions did not pass local quality checks. Review the reported issues.",
+                "balance": balance,
+                "validation": validation,
+                "questions": questions
+            }
+
+        storage_service.update_generation(request.generation_id, {
+            "questions": questions,
+            "settings": {
+                "type_counts": type_counts,
+                "bloom_distribution": bloom,
+                "difficulty": request.difficulty,
+                "total_questions": total
+            },
+            "selected_concept_ids": request.selected_concept_ids,
+            "selected_subtopic_ids": request.selected_subtopic_ids,
+            "selected_source_text": selected_text,
+            "selected_source_pages": pages,
+            "selected_concept_names": names,
+            "status": "questions_generated"
+        })
+
         return {
-            "success": False,
+            "success": True,
             "generation_id": request.generation_id,
-            "message": "Generated questions did not pass local quality checks. Review the reported issues.",
+            "message": "Questions generated and validated.",
+            "totalQuestions": len(questions),
+            "totalPdfPages": record["total_pdf_pages"],
+            "conceptGraph": record["concept_graph"],
+            "questions": questions,
             "balance": balance,
             "validation": validation,
-            "questions": questions
+            "pipeline": {
+                "agent1_concept_graph": "completed",
+                "agent2_question_generation": "completed",
+                "agent3_balance_check": "passed",
+                "agent4_validation": "passed"
+            }
         }
-
-    storage_service.update_generation(request.generation_id, {
-        "questions": questions,
-        "settings": {
-            "type_counts": type_counts,
-            "bloom_distribution": bloom,
-            "difficulty": request.difficulty,
-            "total_questions": total
-        },
-        "selected_concept_ids": request.selected_concept_ids,
-        "selected_subtopic_ids": request.selected_subtopic_ids,
-        "selected_source_text": selected_text,
-        "selected_source_pages": pages,
-        "selected_concept_names": names,
-        "status": "questions_generated"
-    })
-
-    return {
-        "success": True,
-        "generation_id": request.generation_id,
-        "message": "Questions generated and validated.",
-        "totalQuestions": len(questions),
-        "totalPdfPages": record["total_pdf_pages"],
-        "conceptGraph": record["concept_graph"],
-        "questions": questions,
-        "balance": balance,
-        "validation": validation,
-        "pipeline": {
-            "agent1_concept_graph": "completed",
-            "agent2_question_generation": "completed",
-            "agent3_balance_check": "passed",
-            "agent4_validation": "passed"
-        }
-    }
+    except HTTPException:
+        raise
+    except (GeminiQuotaError, GeminiTemporaryError):
+        raise
+    except ValueError as exc:
+        print("Question generation validation error:", exc)
+        raise HTTPException(422, str(exc))
+    except Exception as exc:
+        print("Question generation error:", exc)
+        raise HTTPException(500, str(exc))
 
 
 # STEP 3: Replace one question using only its saved source pages.
@@ -528,13 +575,6 @@ def retry_question(request: QuestionRetryRequest):
     )
     if index is None:
         raise HTTPException(404, "Question not found in this paper.")
-
-    try:
-        retry_info = storage_service.reserve_question_retry(
-            request.generation_id, request.question_id
-        )
-    except ValueError as exc:
-        raise HTTPException(429, str(exc))
 
     original = questions[index]
     question_source = original.get("source") or {}
@@ -554,139 +594,198 @@ def retry_question(request: QuestionRetryRequest):
             "The question cannot be retried safely."
         )
 
-    source_text = "\n\n".join(
-        f"--- File: {page['file']} | Page {page['page']} ---\n{page['text']}"
-        for page in matching_pages
-    )
-
-    type_key = original["type"]
-    bloom_key = original["bloomLevel"]
-    counts = {t: int(t == type_key) for t in question_agent.QUESTION_TYPES}
-    bloom = {b: int(b == bloom_key) for b in question_agent.BLOOM_LEVELS}
-
-    replacement_list = question_agent.generate_questions(
-        text=source_text,
-        mcq_count=counts["MCQ"],
-        true_false_count=counts["TRUE_FALSE"],
-        statement_mcq_count=counts["STATEMENT_MCQ"],
-        fill_blank_count=counts["FILL_BLANK"],
-        short_answer_count=counts["SHORT_ANSWER"],
-        difficulty=original.get("difficulty", "Medium"),
-        bloom_distribution=bloom,
-        concept_graph={"selected_concepts": [original.get("concept", "")]},
-        retry_reason=(
-            "Replace this previous question; do not repeat it.\n"
-            f"Previous question: {original['question']}\n"
-            f"Teacher feedback: {request.feedback}"
+    try:
+        retry_info = storage_service.reserve_question_retry(
+            request.generation_id, request.question_id
         )
-    )
-    replacement = replacement_list[0]
-    replacement["question_id"] = request.question_id
-    replacement["source"] = original.get("source")
-    replacement["number"] = original.get("number")
-    replacement["marks"] = 1
+    except ValueError as exc:
+        raise HTTPException(429, str(exc))
 
-    questions[index] = replacement
-    storage_service.update_generation(request.generation_id, {
-        "questions": questions
-    })
+    try:
+        source_text = "\n\n".join(
+            f"--- File: {page['file']} | Page {page['page']} ---\n{page['text']}"
+            for page in matching_pages
+        )
 
-    return {
-        "success": True,
-        "question": replacement,
-        "questions": questions,
-        "retry": retry_info
-    }
+        type_key = original["type"]
+        bloom_key = original["bloomLevel"]
+        counts = {t: int(t == type_key) for t in question_agent.QUESTION_TYPES}
+        bloom = {b: int(b == bloom_key) for b in question_agent.BLOOM_LEVELS}
+
+        replacement_list = question_agent.generate_questions(
+            text=source_text,
+            mcq_count=counts["MCQ"],
+            true_false_count=counts["TRUE_FALSE"],
+            statement_mcq_count=counts["STATEMENT_MCQ"],
+            fill_blank_count=counts["FILL_BLANK"],
+            short_answer_count=counts["SHORT_ANSWER"],
+            difficulty=original.get("difficulty", "Medium"),
+            bloom_distribution=bloom,
+            concept_graph={"selected_concepts": [original.get("concept", "")]},
+            retry_reason=(
+                "Replace this previous question; do not repeat it.\n"
+                "Write a standalone university exam question with no meta-references "
+                "to the study material, text, passage, slides, or notes.\n"
+                f"Previous question: {original['question']}\n"
+                f"Teacher feedback: {request.feedback}"
+            )
+        )
+        replacement = replacement_list[0]
+        replacement["question_id"] = request.question_id
+        replacement["source"] = original.get("source")
+        replacement["number"] = original.get("number")
+        replacement["marks"] = 1
+
+        questions[index] = replacement
+        storage_service.update_generation(request.generation_id, {
+            "questions": questions
+        })
+
+        return {
+            "success": True,
+            "question": replacement,
+            "questions": questions,
+            "retry": retry_info
+        }
+    except HTTPException:
+        storage_service.release_question_retry(
+            request.generation_id, request.question_id
+        )
+        raise
+    except (GeminiQuotaError, GeminiTemporaryError):
+        storage_service.release_question_retry(
+            request.generation_id, request.question_id
+        )
+        raise
+    except ValueError as exc:
+        storage_service.release_question_retry(
+            request.generation_id, request.question_id
+        )
+        print("Question retry validation error:", exc)
+        raise HTTPException(422, str(exc))
+    except Exception as exc:
+        storage_service.release_question_retry(
+            request.generation_id, request.question_id
+        )
+        print("Question retry error:", exc)
+        raise HTTPException(500, str(exc))
 
 
 # STEP 3: Regenerate the whole paper once, using cached selected material.
 @app.post("/api/retry-paper")
 def retry_paper(request: PaperRetryRequest):
     record = _get_record(request.generation_id)
+    settings = record.get("settings", {})
+    if not settings:
+        raise HTTPException(409, "Generation settings are missing.")
+
     try:
         retry_info = storage_service.reserve_paper_retry(request.generation_id)
     except ValueError as exc:
         raise HTTPException(429, str(exc))
 
-    settings = record.get("settings", {})
-    if not settings:
-        raise HTTPException(409, "Generation settings are missing.")
+    try:
+        source_text = record.get("selected_source_text", "")
+        pages = record.get("selected_source_pages", [])
+        names = record.get("selected_concept_names", [])
+        counts = settings["type_counts"]
+        bloom = settings["bloom_distribution"]
 
-    source_text = record.get("selected_source_text", "")
-    pages = record.get("selected_source_pages", [])
-    names = record.get("selected_concept_names", [])
-    counts = settings["type_counts"]
-    bloom = settings["bloom_distribution"]
+        questions = question_agent.generate_questions(
+            text=source_text,
+            mcq_count=counts["MCQ"],
+            true_false_count=counts["TRUE_FALSE"],
+            statement_mcq_count=counts["STATEMENT_MCQ"],
+            fill_blank_count=counts["FILL_BLANK"],
+            short_answer_count=counts["SHORT_ANSWER"],
+            difficulty=settings["difficulty"],
+            bloom_distribution=bloom,
+            concept_graph={"selected_concepts": names},
+            retry_reason=request.feedback
+        )
+        questions = _attach_sources(questions, names, pages)
+        random.shuffle(questions)
+        for number, question in enumerate(questions, 1):
+            question["number"] = number
 
-    questions = question_agent.generate_questions(
-        text=source_text,
-        mcq_count=counts["MCQ"],
-        true_false_count=counts["TRUE_FALSE"],
-        statement_mcq_count=counts["STATEMENT_MCQ"],
-        fill_blank_count=counts["FILL_BLANK"],
-        short_answer_count=counts["SHORT_ANSWER"],
-        difficulty=settings["difficulty"],
-        bloom_distribution=bloom,
-        concept_graph={"selected_concepts": names},
-        retry_reason=request.feedback
-    )
-    questions = _attach_sources(questions, names, pages)
-    random.shuffle(questions)
-    for number, question in enumerate(questions, 1):
-        question["number"] = number
+        balance, validation = _run_quality_checks(questions, counts, bloom)
+        storage_service.update_generation(request.generation_id, {
+            "questions": questions,
+            "status": "questions_generated"
+        })
 
-    balance, validation = _run_quality_checks(questions, counts, bloom)
-    storage_service.update_generation(request.generation_id, {
-        "questions": questions,
-        "status": "questions_generated"
-    })
-
-    return {
-        "success": True,
-        "generation_id": request.generation_id,
-        "questions": questions,
-        "balance": balance,
-        "validation": validation,
-        "retry": retry_info
-    }
+        return {
+            "success": True,
+            "generation_id": request.generation_id,
+            "questions": questions,
+            "balance": balance,
+            "validation": validation,
+            "retry": retry_info
+        }
+    except HTTPException:
+        storage_service.release_paper_retry(request.generation_id)
+        raise
+    except (GeminiQuotaError, GeminiTemporaryError):
+        storage_service.release_paper_retry(request.generation_id)
+        raise
+    except ValueError as exc:
+        storage_service.release_paper_retry(request.generation_id)
+        print("Paper retry validation error:", exc)
+        raise HTTPException(422, str(exc))
+    except Exception as exc:
+        storage_service.release_paper_retry(request.generation_id)
+        print("Paper retry error:", exc)
+        raise HTTPException(500, str(exc))
 
 
 # Legacy endpoint retained for older single-PDF callers.
 @app.post("/api/build-concepts")
 async def build_concepts(file: UploadFile = File(...)):
-    paths = []
+    uploads = []
     try:
-        paths = _save_uploads([file])
-        text = extract_text_from_pdf(paths[0])
+        uploads = _save_uploads([file])
+        text = extract_text_from_pdf(
+            uploads[0]["path"],
+            display_name=uploads[0]["filename"]
+        )
         graph = concept_agent.extract_concepts(text)
         return {"success": True, "conceptGraph": graph}
     finally:
-        _cleanup(paths)
+        _cleanup(uploads)
 
 
 # Existing Google Forms deployment endpoint retained.
 @app.post("/api/deploy-google-form")
 def deploy_google_form(request: GoogleFormRequest):
-    if not request.title.strip():
-        raise HTTPException(400, "Google Form title is required.")
-    if not request.questions:
-        raise HTTPException(400, "At least one question is required.")
+    try:
+        if not request.title.strip():
+            raise HTTPException(400, "Google Form title is required.")
+        if not request.questions:
+            raise HTTPException(400, "At least one question is required.")
 
-    questions = [q.model_dump() for q in request.questions]
-    for q in questions:
-        q["marks"] = 1
+        questions = [q.model_dump() for q in request.questions]
+        for q in questions:
+            q["marks"] = 1
 
-    service = GoogleFormsService()
-    result = service.deploy_quiz(
-        title=request.title.strip(),
-        questions=questions,
-        description=request.description
-    )
-    return {
-        "success": True,
-        "message": "Google Form quiz created successfully.",
-        "form": result
-    }
+        service = GoogleFormsService()
+        result = service.deploy_quiz(
+            title=request.title.strip(),
+            questions=questions,
+            description=request.description
+        )
+        return {
+            "success": True,
+            "message": "Google Form quiz created successfully.",
+            "form": result
+        }
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        traceback.print_exc()
+        raise HTTPException(422, str(exc))
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(500, str(exc))
 
 @app.get("/api/generation/{generation_id}")
 def get_generation_status(generation_id: str):

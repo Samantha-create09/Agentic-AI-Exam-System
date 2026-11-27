@@ -18,7 +18,10 @@ STATEMENT_OPTIONS = [
 
 
 class QuestionAgent:
-    BATCH_CHARS = 12000
+    BATCH_CHARS = 36000
+    QUESTION_TYPES = QUESTION_TYPES
+    BLOOM_LEVELS = BLOOM_LEVELS
+    STATEMENT_OPTIONS = STATEMENT_OPTIONS
 
     def __init__(self):
         self.llm = LLMService()
@@ -83,41 +86,86 @@ class QuestionAgent:
         q = dict(question)
         q["marks"] = 1
         q["type"] = str(q.get("type", "")).upper().replace("-", "_").replace(" ", "_")
+        q["question"] = str(q.get("question", "")).strip()
 
         if q["type"] == "TRUE_FALSE":
             q["options"] = ["True", "False"]
-            q["correctAnswer"] = str(q.get("correctAnswer", "")).capitalize()
+            q["correctAnswer"] = str(q.get("correctAnswer", "")).strip().rstrip(".").capitalize()
             if q["correctAnswer"] not in ("True", "False"):
                 raise ValueError("True/False answer must be True or False.")
 
         elif q["type"] == "STATEMENT_MCQ":
             q["options"] = STATEMENT_OPTIONS.copy()
+            raw_answer = " ".join(str(q.get("correctAnswer", "")).split()).strip()
+            normalized_map = {
+                opt.rstrip(".").casefold(): opt for opt in STATEMENT_OPTIONS
+            }
+            matched = normalized_map.get(raw_answer.rstrip(".").casefold())
+            if matched:
+                q["correctAnswer"] = matched
+            else:
+                # Handle minor phrasing variations like missing "but"
+                lower = raw_answer.casefold()
+                if "both" in lower and "true" in lower:
+                    q["correctAnswer"] = STATEMENT_OPTIONS[0]
+                elif "both" in lower and "false" in lower:
+                    q["correctAnswer"] = STATEMENT_OPTIONS[1]
+                elif "statement i is true" in lower and "statement ii is false" in lower:
+                    q["correctAnswer"] = STATEMENT_OPTIONS[2]
+                elif "statement i is false" in lower and "statement ii is true" in lower:
+                    q["correctAnswer"] = STATEMENT_OPTIONS[3]
 
         elif q["type"] == "MCQ":
-            options = q.get("options") or []
-            if len(options) != 4 or len({x.strip().casefold() for x in options}) != 4:
+            options = [str(x).strip() for x in (q.get("options") or []) if str(x).strip()]
+            if len(options) != 4 or len({x.casefold() for x in options}) != 4:
                 raise ValueError("Every MCQ must have exactly four distinct options.")
             q["options"] = options
 
+            raw_answer = str(q.get("correctAnswer", "")).strip()
+            exact_by_case = {opt.casefold(): opt for opt in options}
+            if raw_answer in options:
+                q["correctAnswer"] = raw_answer
+            elif raw_answer.casefold() in exact_by_case:
+                q["correctAnswer"] = exact_by_case[raw_answer.casefold()]
+            elif raw_answer.upper() in {"A", "B", "C", "D"}:
+                q["correctAnswer"] = options["ABCD".index(raw_answer.upper())]
+            elif raw_answer in {"1", "2", "3", "4"}:
+                q["correctAnswer"] = options[int(raw_answer) - 1]
+            else:
+                q["correctAnswer"] = raw_answer
+
         elif q["type"] in ("FILL_BLANK", "SHORT_ANSWER"):
-            accepted = q.get("acceptedAnswers") or []
-            if isinstance(accepted, str):
-                accepted = [accepted]
-            answer = q.get("correctAnswer", "")
-            if answer and answer not in accepted:
+            raw_accepted = q.get("acceptedAnswers") or []
+            if isinstance(raw_accepted, str):
+                raw_accepted = [raw_accepted]
+            accepted = []
+            seen_ans = set()
+            for item in raw_accepted:
+                cleaned = str(item).strip()
+                if cleaned and cleaned.casefold() not in seen_ans:
+                    accepted.append(cleaned)
+                    seen_ans.add(cleaned.casefold())
+
+            answer = str(q.get("correctAnswer", "")).strip()
+            if not answer and accepted:
+                answer = accepted[0]
+            if answer and answer.casefold() not in seen_ans:
                 accepted.insert(0, answer)
-            if not accepted:
-                raise ValueError(f"{q['type']} needs an accepted answer.")
+            if not answer or not accepted:
+                raise ValueError(f"{q['type']} needs a correct answer and accepted answers.")
+            q["correctAnswer"] = answer
             q["acceptedAnswers"] = accepted
 
         if q["type"] not in QUESTION_TYPES:
             raise ValueError(f"Unsupported question type: {q['type']}")
         if q.get("bloomLevel") not in BLOOM_LEVELS:
             raise ValueError("Generated question has an invalid Bloom level.")
-        if not str(q.get("question", "")).strip():
+        if not q["question"]:
             raise ValueError("Generated question text is empty.")
-        q.setdefault("explanation", "")
-        q.setdefault("concept", "Selected concept")
+        if not str(q.get("explanation", "")).strip():
+            q["explanation"] = "Grounded in the selected study material."
+        if not str(q.get("concept", "")).strip():
+            q["concept"] = "Selected concept"
         return q
 
     @staticmethod
@@ -250,16 +298,28 @@ class QuestionAgent:
         }
 
         instructions = """
-You are Agent 2. Generate examination questions ONLY from the supplied
-selected study-material batch. Do not use outside knowledge.
+You are Agent 2. Generate clean, standalone university examination questions
+grounded ONLY in the facts present in the supplied study-material batch.
+Do not use outside knowledge.
 
-Follow the exact requested question-type counts and Bloom counts.
-Every question is worth exactly 1 mark.
-MCQ: exactly four distinct options and one correct answer.
-TRUE_FALSE: one statement, answer True or False.
-STATEMENT_MCQ: two statements and the four standard truth-combination options.
-FILL_BLANK: meaningful blank plus correctAnswer and acceptedAnswers.
-SHORT_ANSWER: focused answerable question plus correctAnswer and acceptedAnswers.
+CRITICAL PHRASING RULE:
+- Write every question as a self-contained exam question.
+- NEVER include self-referential or meta phrases such as "According to the study material",
+  "According to the text", "Based on the passage", "In the provided notes",
+  "As mentioned in the slides", "From the document", or any reference to
+  "the passage", "the text", "the slides", or "the notes".
+- Example: ask "What underlying kernel is the Android operating system built upon?"
+  NOT "According to the study material, what underlying kernel is Android built upon?"
+
+Follow the exact requested question-type counts and Bloom counts:
+the total number of returned questions MUST equal the exact sum of EXACT TYPE COUNTS.
+Every question is worth exactly 1 mark (marks: 1).
+- MCQ: exactly four distinct options, and correctAnswer MUST match one option verbatim.
+- TRUE_FALSE: one statement, options ["True", "False"], correctAnswer "True" or "False".
+- STATEMENT_MCQ: question MUST contain both "Statement I: ..." and "Statement II: ...", options MUST be ["Both statements are true.", "Both statements are false.", "Statement I is true, but Statement II is false.", "Statement I is false, but Statement II is true."], and correctAnswer MUST be one of those four exact strings.
+- FILL_BLANK: meaningful blank plus non-empty correctAnswer and non-empty acceptedAnswers.
+- SHORT_ANSWER: focused answerable question plus non-empty correctAnswer and non-empty acceptedAnswers.
+Always provide non-empty concept and explanation strings.
 Avoid duplicates. Return JSON only.
 """
 
@@ -289,7 +349,8 @@ Avoid duplicates. Return JSON only.
                     f"SOURCE BATCH {index + 1}/{len(chunks)}:\n{chunk}"
                 ),
                 schema_name="exam_questions",
-                schema=schema
+                schema=schema,
+                task="question_generation",
             )
 
             generated = result.get("questions", [])

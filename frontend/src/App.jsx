@@ -1,4 +1,3 @@
-
 import {
     BrowserRouter,
     Routes,
@@ -9,7 +8,6 @@ import {
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
 import CreateExam from "./pages/CreateExam";
-import UploadMaterial from "./pages/UploadMaterial";
 import GenerateQuestions from "./pages/GenerateQuestions";
 import SelectConcepts from "./pages/SelectConcepts";
 import ReviewQuestions from "./pages/ReviewQuestions";
@@ -23,7 +21,10 @@ function App() {
                 <Route path="/" element={<Login />} />
                 <Route path="/dashboard" element={<Dashboard />} />
                 <Route path="/create-exam" element={<CreateExam />} />
-                <Route path="/upload-material" element={<UploadMaterial />} />
+                <Route
+                    path="/upload-material"
+                    element={<Navigate to="/generate-questions" replace />}
+                />
                 <Route path="/generate-questions" element={<GenerateQuestions />} />
                 <Route path="/select-concepts" element={<SelectConcepts />} />
                 <Route path="/review-questions" element={<ReviewQuestions />} />

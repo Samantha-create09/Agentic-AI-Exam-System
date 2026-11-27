@@ -78,6 +78,23 @@ class StorageService:
         with self.lock:
             return self._read()["generations"].get(generation_id)
 
+    def find_cached_analysis(self, content_hash):
+        if not content_hash:
+            return None
+        with self.lock:
+            generations = self._read()["generations"].values()
+            matches = [
+                record for record in generations
+                if record.get("content_hash") == content_hash
+                and record.get("extracted_text")
+                and isinstance(record.get("concept_graph"), dict)
+                and "concepts" in record["concept_graph"]
+            ]
+            if not matches:
+                return None
+            matches.sort(key=lambda r: r.get("updated_at", ""), reverse=True)
+            return matches[0]
+
     def update_generation(self, generation_id, updates):
         with self.lock:
             data = self._read()
@@ -117,6 +134,26 @@ class StorageService:
                 "paper_individual_retries_remaining": 9 - total,
             }
 
+    def release_question_retry(self, generation_id, question_id):
+        with self.lock:
+            data = self._read()
+            record = data["generations"].get(generation_id)
+            if not record:
+                return None
+
+            counts = record.setdefault("individual_retry_counts", {})
+            per_question = int(counts.get(question_id, 0))
+            if per_question > 0:
+                counts[question_id] = per_question - 1
+
+            total = int(record.get("individual_retry_total", 0))
+            if total > 0:
+                record["individual_retry_total"] = total - 1
+
+            record["updated_at"] = self.now()
+            self._write(data)
+            return record
+
     def reserve_paper_retry(self, generation_id):
         with self.lock:
             data = self._read()
@@ -130,6 +167,20 @@ class StorageService:
             record["updated_at"] = self.now()
             self._write(data)
             return {"paper_retry_count": 1, "paper_retries_remaining": 0}
+
+    def release_paper_retry(self, generation_id):
+        with self.lock:
+            data = self._read()
+            record = data["generations"].get(generation_id)
+            if not record:
+                return None
+
+            current = int(record.get("paper_retry_count", 0))
+            if current > 0:
+                record["paper_retry_count"] = current - 1
+            record["updated_at"] = self.now()
+            self._write(data)
+            return record
 
 
 storage_service = StorageService()

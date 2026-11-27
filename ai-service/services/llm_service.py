@@ -1,12 +1,17 @@
 import json
 import os
 import re
+import threading
 import time
 
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
+_ENV_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"
+)
+load_dotenv(dotenv_path=_ENV_PATH)
 load_dotenv()
 
 
@@ -26,42 +31,67 @@ class GeminiTemporaryError(Exception):
         self.retry_after_seconds = retry_after_seconds
 
 
+_COOLDOWN_LOCK = threading.Lock()
+_MODEL_COOLDOWNS: dict[str, float] = {}
+
+
 class LLMService:
+    LIGHT_TASKS = {"concept_extraction", "concept_assessment", "light"}
+    HEAVY_TASKS = {"question_generation", "question_retry", "paper_retry", "heavy"}
+    DEFAULT_QUOTA_COOLDOWN_SECONDS = 60
 
     def __init__(self):
         self.mode = os.getenv("LLM_MODE", "gemini").lower()
         self.gemini_api_key = os.getenv("GEMINI_API_KEY")
-        self.gemini_model = os.getenv(
-            "GEMINI_MODEL",
-            "gemini-2.5-flash"
+
+        legacy_model = os.getenv("GEMINI_MODEL", "").strip()
+        self.legacy_model = legacy_model or None
+
+        self.light_model = (
+            os.getenv("GEMINI_LIGHT_MODEL", "").strip()
+            or legacy_model
+            or "gemini-3.5-flash-lite"
+        )
+        self.heavy_model = (
+            os.getenv("GEMINI_HEAVY_MODEL", "").strip()
+            or legacy_model
+            or "gemini-3.8-flash"
+        )
+        self.fallback_model = (
+            os.getenv("GEMINI_FALLBACK_MODEL", "").strip()
+            or "gemini-3.5-flash-lite"
+        )
+        self.gemini_model = self.heavy_model
+
+        self.max_retries = int(os.getenv("GEMINI_MAX_RETRIES", "3"))
+        self.retry_delay = float(os.getenv("GEMINI_RETRY_DELAY", "2"))
+        self.default_cooldown_seconds = int(
+            os.getenv(
+                "GEMINI_QUOTA_COOLDOWN_SECONDS",
+                str(self.DEFAULT_QUOTA_COOLDOWN_SECONDS),
+            )
         )
 
-        self.max_retries = int(
-            os.getenv("GEMINI_MAX_RETRIES", "3")
-        )
-
-        self.retry_delay = float(
-            os.getenv("GEMINI_RETRY_DELAY", "2")
+        self.request_timeout_ms = int(
+            os.getenv("GEMINI_REQUEST_TIMEOUT_MS", "60000")
         )
 
         if self.mode != "gemini":
-            raise ValueError(
-                f"Unsupported LLM_MODE: {self.mode}"
-            )
+            raise ValueError(f"Unsupported LLM_MODE: {self.mode}")
 
         if not self.gemini_api_key:
-            raise ValueError(
-                "GEMINI_API_KEY is missing from ai-service/.env"
-            )
+            raise ValueError("GEMINI_API_KEY is missing from ai-service/.env")
 
-        # IMPORTANT:
-        # Structured JSON output requires the v1beta API version
-        # for the configuration currently used by this project.
+        # Structured JSON output requires the v1beta API version.
+        # Set a 60s per-request timeout (in ms) and disable hidden SDK retries
+        # so failed calls fail over immediately without hanging.
         self.client = genai.Client(
             api_key=self.gemini_api_key,
             http_options=types.HttpOptions(
-                api_version="v1beta"
-            )
+                api_version="v1beta",
+                timeout=self.request_timeout_ms,
+                retry_options=types.HttpRetryOptions(attempts=1),
+            ),
         )
 
     @staticmethod
@@ -73,7 +103,6 @@ class LLMService:
         ]
 
         response_json = getattr(error, "response_json", None)
-
         if response_json:
             parts.append(str(response_json))
 
@@ -85,9 +114,7 @@ class LLMService:
         Return a retry delay only if the provider supplied one.
         Do not guess a daily quota reset time.
         """
-
         text = cls._error_text(error)
-
         patterns = [
             r"retryDelay['\"]?\s*[:=]\s*['\"]?(\d+(?:\.\d+)?)s",
             r"retry_delay['\"]?\s*[:=]\s*['\"]?(\d+(?:\.\d+)?)",
@@ -97,7 +124,6 @@ class LLMService:
 
         for pattern in patterns:
             match = re.search(pattern, text, re.IGNORECASE)
-
             if match:
                 return max(0, int(float(match.group(1))))
 
@@ -107,36 +133,40 @@ class LLMService:
     def _classify_error(cls, error):
         text = cls._error_text(error).lower()
 
-        # Permanent or longer-period quota exhaustion.
+        # Any 429 / resource exhaustion / quota limit is handled via per-model
+        # cooldown and single fallback rather than a retry loop.
         quota_phrases = [
-    "quota exceeded",
-    "quota_exceeded",
-    "quota exhausted",
-    "quota has been exhausted",
-    "temporarily exhausted the available quota",
-    "daily quota",
-    "requests per day",
-    "tokens per day",
-    "billing limit",
-    "free tier quota",
-    "insufficient quota",
-    "limit: 0",
-]
-
-        # Temporary errors, including per-minute rate limits.
-        temporary_phrases = [
-            "429",
-            "resource_exhausted",
-            "rate limit",
+            "quota exceeded",
+            "quota_exceeded",
+            "quota exhausted",
+            "quota has been exhausted",
+            "temporarily exhausted the available quota",
+            "daily quota",
+            "requests per day",
+            "tokens per day",
             "requests per minute",
             "tokens per minute",
+            "rate limit",
+            "billing limit",
+            "free tier quota",
+            "insufficient quota",
+            "limit: 0",
+            "resource_exhausted",
+            "429",
+        ]
+
+        temporary_phrases = [
             "503",
             "502",
             "500",
             "504",
             "temporarily unavailable",
+            "unavailable",
             "overloaded",
             "timeout",
+            "timed out",
+            "readtimeout",
+            "connecttimeout",
             "deadline exceeded",
             "connection reset",
             "service unavailable",
@@ -145,61 +175,110 @@ class LLMService:
         if any(term in text for term in quota_phrases):
             return "quota"
 
-       # Resource exhaustion without a clear daily-quota message can
-       # represent a short-term rate limit. Do not assume it is a
-       # permanent daily quota.
-        if "resource_exhausted" in text or "429" in text:
-            return "temporary"
-
         if any(term in text for term in temporary_phrases):
             return "temporary"
 
         return "other"
 
-    def generate_json(
-        self,
-        instructions,
-        input_text,
-        schema_name,
-        schema
-    ):
-        prompt = (
-            f"{instructions}\n\n"
-            "Return valid JSON matching the supplied schema.\n\n"
-            f"INPUT MATERIAL:\n{input_text}"
-        )
+    @classmethod
+    def _cooldown_remaining(cls, model_name):
+        now = time.time()
+        with _COOLDOWN_LOCK:
+            until = _MODEL_COOLDOWNS.get(model_name)
+            if until is None:
+                return 0
+            if now >= until:
+                _MODEL_COOLDOWNS.pop(model_name, None)
+                return 0
+            return max(1, int(until - now))
 
+    @classmethod
+    def _set_cooldown(cls, model_name, duration_seconds):
+        until = time.time() + max(1, int(duration_seconds))
+        with _COOLDOWN_LOCK:
+            existing = _MODEL_COOLDOWNS.get(model_name, 0)
+            _MODEL_COOLDOWNS[model_name] = max(existing, until)
+
+    @classmethod
+    def clear_cooldowns(cls):
+        """Clear all per-model cooldowns (useful for tests)."""
+        with _COOLDOWN_LOCK:
+            _MODEL_COOLDOWNS.clear()
+
+    def _resolve_models(self, task=None, model=None):
+        if model:
+            return model, None
+
+        normalized_task = (task or "").strip().lower()
+        if normalized_task in self.LIGHT_TASKS:
+            return self.light_model, None
+
+        if normalized_task in self.HEAVY_TASKS:
+            fallback = (
+                self.fallback_model
+                if self.fallback_model and self.fallback_model != self.heavy_model
+                else None
+            )
+            return self.heavy_model, fallback
+
+        primary = self.legacy_model or self.heavy_model
+        fallback = (
+            self.fallback_model
+            if self.fallback_model and self.fallback_model != primary
+            else None
+        )
+        return primary, fallback
+
+    @staticmethod
+    def _build_quota_error(model_name, retry_after, detail=""):
+        if retry_after is not None:
+            message = (
+                f"Gemini model '{model_name}' has temporarily exhausted the "
+                f"available quota. Suggested retry delay: approximately "
+                f"{retry_after} seconds."
+            )
+        else:
+            message = (
+                f"Gemini model '{model_name}' quota has been exhausted. "
+                "Check your Google AI Studio usage and quota limits before retrying."
+            )
+        if detail:
+            message = f"{message} ({detail})"
+        return GeminiQuotaError(message, retry_after_seconds=retry_after)
+
+    def _invoke_model(self, model_name, prompt, schema_name, schema, allow_retries=True):
+        attempts = self.max_retries if allow_retries else 1
         last_error = None
 
-        for attempt in range(self.max_retries):
+        for attempt in range(attempts):
             try:
                 response = self.client.models.generate_content(
-                    model=self.gemini_model,
+                    model=model_name,
                     contents=prompt,
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
-                        response_schema=schema
-                    )
+                        response_schema=schema,
+                        automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                            disable=True
+                        ),
+                    ),
                 )
 
                 if not response.text:
                     raise ValueError(
-                        f"Gemini returned an empty response "
-                        f"for {schema_name}."
+                        f"Gemini returned an empty response for {schema_name}."
                     )
 
                 try:
                     result = json.loads(response.text)
                 except json.JSONDecodeError as error:
                     raise ValueError(
-                        f"Gemini returned invalid JSON for "
-                        f"{schema_name}: {error}"
+                        f"Gemini returned invalid JSON for {schema_name}: {error}"
                     ) from error
 
                 if not isinstance(result, dict):
                     raise ValueError(
-                        f"Gemini returned an invalid JSON object "
-                        f"for {schema_name}."
+                        f"Gemini returned an invalid JSON object for {schema_name}."
                     )
 
                 return result
@@ -213,50 +292,85 @@ class LLMService:
                 retry_after = self._retry_after_seconds(error)
 
                 if error_type == "quota":
-                    if retry_after is not None:
-                        message = (
-                            "Gemini has temporarily exhausted the "
-                            "available quota. Google supplied a retry "
-                            f"delay of approximately {retry_after} seconds. "
-                            "Please try again after that interval."
-                        )
-                    else:
-                        message = (
-                            "Gemini's available API quota has been "
-                            "exhausted. Google did not provide a reliable "
-                            "reset time, so we cannot tell you exactly "
-                            "when generation will be available again. "
-                            "Please check your Google AI Studio usage "
-                            "and quota limits before retrying."
-                        )
-
-                    raise GeminiQuotaError(
-                        message,
-                        retry_after_seconds=retry_after
+                    cooldown = (
+                        retry_after
+                        if retry_after is not None and retry_after > 0
+                        else self.default_cooldown_seconds
+                    )
+                    self._set_cooldown(model_name, cooldown)
+                    raise self._build_quota_error(
+                        model_name,
+                        retry_after,
+                        detail=str(error),
                     ) from error
 
                 if error_type == "other":
                     raise RuntimeError(
-                        f"Gemini request failed while generating "
-                        f"{schema_name}: {error}"
+                        f"Gemini request failed while generating {schema_name} "
+                        f"with model '{model_name}': {error}"
                     ) from error
 
-                if attempt < self.max_retries - 1:
-                    # Use Google's delay if supplied. Otherwise use
-                    # a short bounded backoff for temporary failures.
+                if attempt < attempts - 1:
                     wait_seconds = (
                         retry_after
                         if retry_after is not None
                         else self.retry_delay * (2 ** attempt)
                     )
-
                     time.sleep(min(wait_seconds, 60))
 
         retry_after = self._retry_after_seconds(last_error)
-
         raise GeminiTemporaryError(
-            f"Gemini remained temporarily unavailable after "
-            f"{self.max_retries} attempts while generating "
-            f"{schema_name}. Please try again later.",
-            retry_after_seconds=retry_after
+            f"Gemini model '{model_name}' remained temporarily unavailable after "
+            f"{attempts} attempts while generating {schema_name}. Please try again later.",
+            retry_after_seconds=retry_after,
         ) from last_error
+
+    def generate_json(
+        self,
+        instructions,
+        input_text,
+        schema_name,
+        schema,
+        task=None,
+        model=None,
+    ):
+        prompt = (
+            f"{instructions}\n\n"
+            "Return valid JSON matching the supplied schema.\n\n"
+            f"INPUT MATERIAL:\n{input_text}"
+        )
+
+        primary_model, fallback_model = self._resolve_models(task=task, model=model)
+        primary_cooldown = self._cooldown_remaining(primary_model)
+
+        if primary_cooldown > 0:
+            if fallback_model and self._cooldown_remaining(fallback_model) == 0:
+                return self._invoke_model(
+                    fallback_model,
+                    prompt,
+                    schema_name,
+                    schema,
+                    allow_retries=False,
+                )
+            raise self._build_quota_error(primary_model, primary_cooldown)
+
+        try:
+            # When a fallback model exists (e.g. heavy -> flash-lite), fail over
+            # immediately on 429/503/timeout without sleeping or looping retries.
+            return self._invoke_model(
+                primary_model,
+                prompt,
+                schema_name,
+                schema,
+                allow_retries=(fallback_model is None),
+            )
+        except (GeminiQuotaError, GeminiTemporaryError):
+            if fallback_model and self._cooldown_remaining(fallback_model) == 0:
+                return self._invoke_model(
+                    fallback_model,
+                    prompt,
+                    schema_name,
+                    schema,
+                    allow_retries=False,
+                )
+            raise

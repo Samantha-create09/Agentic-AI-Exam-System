@@ -50,11 +50,21 @@ const pool = new Pool({
 });
 
 function sendUpstreamError(res, error, fallback) {
+    const status = error.response?.status || 500;
     const data = error.response?.data;
-    return res.status(error.response?.status || 500).json({
+    console.error("Upstream AI service error:", {
+        status,
+        data: data ?? error.message
+    });
+    const detailText = typeof data?.detail === "string"
+        ? data.detail
+        : Array.isArray(data?.detail)
+            ? data.detail.map(item => item?.msg || JSON.stringify(item)).join("; ")
+            : null;
+    return res.status(status).json({
         success: false,
         error: data?.error,
-        message: data?.message || fallback,
+        message: data?.message || detailText || fallback,
         detail: data?.detail || error.message,
         retry_at: data?.retry_at,
         retry_after_seconds: data?.retry_after_seconds
@@ -131,7 +141,7 @@ app.post(
             const form = new FormData();
             for (const file of files) {
                 form.append("files", fs.createReadStream(file.path), {
-                    filename: path.basename(file.originalname),
+                    filename: path.basename(file.originalname || "upload.pdf"),
                     contentType: "application/pdf"
                 });
             }
@@ -238,6 +248,18 @@ app.post("/api/deploy-google-form", async (req, res) => {
     }
 });
 
+app.get("/api/generation/:generationId", async (req, res) => {
+    try {
+        const response = await axios.get(
+            `${AI_URL}/api/generation/${encodeURIComponent(req.params.generationId)}`,
+            { timeout: 15000 }
+        );
+        res.status(response.status).json(response.data);
+    } catch (error) {
+        sendUpstreamError(res, error, "Could not load the saved generation.");
+    }
+});
+
 app.use((error, req, res, next) => {
     if (error instanceof multer.MulterError) {
         const message = error.code === "LIMIT_FILE_SIZE"
@@ -265,18 +287,6 @@ app.use((error, req, res, next) => {
         message: "An unexpected backend error occurred.",
         detail: error.message
     });
-});
-
-app.get("/api/generation/:generationId", async (req, res) => {
-    try {
-        const response = await axios.get(
-            `${AI_URL}/api/generation/${encodeURIComponent(req.params.generationId)}`,
-            { timeout: 15000 }
-        );
-        res.status(response.status).json(response.data);
-    } catch (error) {
-        sendUpstreamError(res, error, "Could not load the saved generation.");
-    }
 });
 
 app.listen(PORT, () => {

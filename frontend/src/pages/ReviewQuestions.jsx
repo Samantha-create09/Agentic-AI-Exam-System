@@ -1,6 +1,7 @@
-
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import Sidebar from "../components/Sidebar";
+import WorkflowStepper from "../components/WorkflowStepper";
 
 const API_URL = "http://localhost:5000";
 
@@ -9,10 +10,15 @@ const BLOOM_FIELDS = [
     "Analyze", "Evaluate", "Create"
 ];
 
-const TYPE_FIELDS = [
-    "MCQ", "TRUE_FALSE", "STATEMENT_MCQ",
-    "FILL_BLANK", "SHORT_ANSWER"
-];
+function getTypePillClass(type) {
+    if (type === "TRUE_FALSE") return "pill pill-teal";
+    if (type === "FILL_BLANK" || type === "SHORT_ANSWER") return "pill pill-amber";
+    return "pill pill-indigo";
+}
+
+function formatTypeLabel(type) {
+    return (type || "").replaceAll("_", " ");
+}
 
 async function api(url, body) {
     const response = await fetch(`${API_URL}${url}`, {
@@ -66,6 +72,7 @@ export default function ReviewQuestions() {
     const [retryingQuestion, setRetryingQuestion] = useState(null);
     const [retryingPaper, setRetryingPaper] = useState(false);
     const [publishing, setPublishing] = useState(false);
+    const [publishedResult, setPublishedResult] = useState(null);
     const [feedback, setFeedback] = useState({});
     const [paperFeedback, setPaperFeedback] = useState("");
     const [error, setError] = useState("");
@@ -73,6 +80,7 @@ export default function ReviewQuestions() {
     const [paperRetryCount, setPaperRetryCount] = useState(0);
     const [individualRetryTotal, setIndividualRetryTotal] = useState(0);
     const [retryCounts, setRetryCounts] = useState({});
+    const hasTriggeredGenerateRef = useRef(false);
 
     const totalMarks = useMemo(
         () => questions.reduce((sum, q) => sum + Number(q.marks || 1), 0),
@@ -104,8 +112,12 @@ export default function ReviewQuestions() {
             })
             .catch(err => console.error("Could not restore retry status:", err));
 
-        // If arriving from Step 2, generate the paper now.
-        if (new URLSearchParams(window.location.search).get("stage") === "generate") {
+        // If arriving from Step 2, generate the paper once (guarded against StrictMode double-mount).
+        if (
+            !hasTriggeredGenerateRef.current &&
+            new URLSearchParams(window.location.search).get("stage") === "generate"
+        ) {
+            hasTriggeredGenerateRef.current = true;
             generatePaper();
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -114,6 +126,7 @@ export default function ReviewQuestions() {
     async function generatePaper() {
         setLoading(true);
         setError("");
+        setPublishedResult(null);
         try {
             const bloomDistribution = {
                 Remember: Number(settings.remember_count || 0),
@@ -171,7 +184,7 @@ export default function ReviewQuestions() {
         saveQuestions(updateItem(questions, index, { [field]: value }));
     }
 
-    async function retryOne(question, index) {
+    async function retryOne(question) {
         setError("");
         setNotice("");
 
@@ -211,6 +224,7 @@ export default function ReviewQuestions() {
     async function retryWholePaper() {
         setError("");
         setNotice("");
+        setPublishedResult(null);
         setRetryingPaper(true);
         try {
             const data = await api("/api/retry-paper", {
@@ -238,8 +252,9 @@ export default function ReviewQuestions() {
 
         setPublishing(true);
         try {
+            const examTitle = sessionStorage.getItem("examTitle") || "Examination";
             const data = await api("/api/deploy-google-form", {
-                title: sessionStorage.getItem("examTitle") || "Examination",
+                title: examTitle,
                 description: sessionStorage.getItem("examSubject") || "",
                 questions: questions.map(q => ({
                     question: q.question,
@@ -255,9 +270,33 @@ export default function ReviewQuestions() {
                 }))
             });
 
+            const form = data.form || {};
+            const formUrl = form.formUrl || form.responderUri || "";
+            const publishedExam = {
+                ...form,
+                formUrl,
+                editUrl: form.editUrl || "",
+                title: form.title || examTitle,
+                formTitle: form.title || examTitle,
+                questionCount: form.questionCount ?? questions.length,
+                publishedAt: new Date().toISOString()
+            };
+
+            if (formUrl) {
+                sessionStorage.setItem("publishedForm", JSON.stringify(publishedExam));
+                const existing = loadJson("publishedExams", []);
+                const list = Array.isArray(existing) ? existing : [];
+                const deduped = [
+                    publishedExam,
+                    ...list.filter(item => item?.formUrl && item.formUrl !== formUrl)
+                ];
+                sessionStorage.setItem("publishedExams", JSON.stringify(deduped));
+                setPublishedResult(publishedExam);
+            }
+
             setNotice(
-                data.form?.responderUri
-                    ? `Google Form created: ${data.form.responderUri}`
+                formUrl
+                    ? `Google Form created: ${formUrl}`
                     : "Google Form created successfully."
             );
         } catch (err) {
@@ -267,189 +306,289 @@ export default function ReviewQuestions() {
         }
     }
 
-    if (loading) {
-        return (
-            <main className="workflow-page">
-                <div className="processing-card">
-                    <div className="loader" />
-                    <h2>Generating your examination</h2>
-                    <p>Agent 2 is generating from the approved source pages. Agents 3 and 4 will check the result.</p>
-                </div>
-            </main>
-        );
-    }
-
     return (
-        <div className="workflow-page">
-            <header className="workflow-header">
-                <div>
-                    <p className="eyebrow">Agentic AI Exam System</p>
-                    <h1>Review Questions</h1>
-                    <p>Step 3 of 4 — Review, edit and improve the generated paper.</p>
-                </div>
-            </header>
+        <div className="app-layout">
+            <Sidebar />
 
-            <main className="workflow-card">
-                <div className="total-line">
-                    <span>Total questions: <strong>{questions.length}</strong></span>
-                    <span>Total marks: <strong>{totalMarks}</strong></span>
+            <main className="main-content">
+                <div className="topbar">
+                    <div className="topbar-title">Review &amp; Publish</div>
+
+                    <div className="user-area">
+                        <strong>Teacher</strong>
+                        <div className="avatar">T</div>
+                    </div>
                 </div>
 
-                {questions.map((question, index) => (
-                    <article className="question-card" key={question.question_id || index}>
-                        <div className="section-heading">
-                            <h2>Question {index + 1}</h2>
-                            <span>{question.type} · 1 mark</span>
-                        </div>
-
-                        <label>
-                            Question
-                            <textarea
-                                rows={3}
-                                value={question.question}
-                                onChange={e => changeQuestion(index, "question", e.target.value)}
-                            />
-                        </label>
-
-                        {["MCQ", "TRUE_FALSE", "STATEMENT_MCQ"].includes(question.type) && (
-                            <label>
-                                Options (one per line)
-                                <textarea
-                                    rows={4}
-                                    value={(question.options || []).join("\n")}
-                                    onChange={e => changeQuestion(
-                                        index,
-                                        "options",
-                                        e.target.value.split("\n").map(x => x.trim()).filter(Boolean)
-                                    )}
-                                />
-                            </label>
-                        )}
-
-                        <div className="form-grid">
-                            <label>
-                                Correct answer
-                                <input
-                                    value={question.correctAnswer || ""}
-                                    onChange={e => changeQuestion(index, "correctAnswer", e.target.value)}
-                                />
-                            </label>
-                            <label>
-                                Bloom level
-                                <select
-                                    value={question.bloomLevel}
-                                    onChange={e => changeQuestion(index, "bloomLevel", e.target.value)}
-                                >
-                                    {BLOOM_FIELDS.map(level => <option key={level}>{level}</option>)}
-                                </select>
-                            </label>
-                        </div>
-
-                        {["FILL_BLANK", "SHORT_ANSWER"].includes(question.type) && (
-                            <label>
-                                Accepted answers (comma-separated)
-                                <input
-                                    value={(question.acceptedAnswers || []).join(", ")}
-                                    onChange={e => changeQuestion(
-                                        index,
-                                        "acceptedAnswers",
-                                        e.target.value.split(",").map(x => x.trim()).filter(Boolean)
-                                    )}
-                                />
-                            </label>
-                        )}
-
-                        <p>
-                            <strong>Concept:</strong> {question.concept || "Not specified"}
-                        </p>
-                        <p>
-                            <strong>Source:</strong>{" "}
-                            {question.source
-                                ? `${(question.source.files || []).join(", ")} · pages ${(question.source.pages || []).join(", ")}`
-                                : "Source metadata unavailable"}
-                        </p>
-
-                        <label>
-                            Teacher feedback for retry
-                            <textarea
-                                rows={2}
-                                value={feedback[question.question_id] || ""}
-                                onChange={e => setFeedback(current => ({
-                                    ...current,
-                                    [question.question_id]: e.target.value
-                                }))}
-                                placeholder="Explain what is incorrect or should be improved..."
-                            />
-                        </label>
-
-                        <button
-                            type="button"
-                            className="secondary-button"
-                            disabled={
-                                retryingQuestion === question.question_id ||
-                                (retryCounts[question.question_id] || 0) >= 2 ||
-                                individualRetryTotal >= 10
-                            }
-                            onClick={() => retryOne(question, index)}
-                        >
-                            {retryingQuestion === question.question_id
-                                ? "Retrying..."
-                                : "Retry this question"}
-                        </button>
-
-                        {(
-                           (retryCounts[question.question_id] || 0) > 0 ||
-                           individualRetryTotal >= 10
-                        ) && (
-                            <p className="retry-warning">
-                            Limit: 2 retries per question; 10 individual retries per paper.
-                            {(retryCounts[question.question_id] || 0) >= 2
-                               ? " This question has no retries remaining."
-                               : ` ${2 - (retryCounts[question.question_id] || 0)} question retries remaining.`}
-                            {individualRetryTotal >= 10
-                               ? " The paper has no individual retries remaining."
-                               : ""}
-                            </p>
-                        )}
-                    </article>
-                ))}
-
-                <section>
-                    <h2>Retry the entire paper</h2>
-                    <p className="retry-warning">
-                        You can retry the entire paper once. This uses the cached selected source material.
-                    </p>
-                    <textarea
-                        rows={3}
-                        value={paperFeedback}
-                        onChange={e => setPaperFeedback(e.target.value)}
-                        placeholder="Optional feedback for the complete paper..."
+                <div className="content">
+                    <WorkflowStepper
+                        currentStep={publishedResult ? 4 : 3}
+                        published={Boolean(publishedResult)}
                     />
-                    <button
-                        className="secondary-button"
-                        disabled={paperRetryCount >= 1 || retryingPaper}
-                        onClick={retryWholePaper}
-                    >
-                        {retryingPaper ? "Regenerating paper..." : "Retry entire paper once"}
-                    </button>
-                   {paperRetryCount >= 1 && (
-                     <p className="retry-warning">
-                     The whole-paper retry limit has been reached. No further paper retries are available.
-                     </p>
+
+                    {loading ? (
+                        <div className="workflow-page review-page">
+                            <div className="processing-card">
+                                <div className="loader" />
+                                <h2>Generating your examination</h2>
+                                <p>
+                                    Agent 2 is generating questions from your approved syllabus pages.
+                                    Agents 3 and 4 are verifying balance and format.
+                                </p>
+                            </div>
+                        </div>
+                    ) : !generationId ? (
+                        <div className="workflow-page review-page">
+                            <div className="workflow-card">
+                                <h2>Generation session not found</h2>
+                                <p className="workflow-step">
+                                    Please upload and analyse your study material first.
+                                </p>
+                                <div className="workflow-actions">
+                                    <button
+                                        type="button"
+                                        className="primary-button"
+                                        onClick={() => navigate("/generate-questions")}
+                                    >
+                                        Back to Step 1
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="workflow-page review-page">
+                            <header className="workflow-header">
+                                <div>
+                                    <p className="eyebrow">Step 3 &amp; 4</p>
+                                    <h1>Review &amp; Publish Paper</h1>
+                                    <p className="workflow-step">
+                                        Inspect, edit, or regenerate questions before deploying your quiz to Google Forms.
+                                    </p>
+                                </div>
+                            </header>
+
+                            <div className="workflow-card">
+                                <div className="review-summary-bar">
+                                    <div className="review-stat-pills">
+                                        <span className="stat-pill">
+                                            Questions: <strong>{questions.length}</strong>
+                                        </span>
+                                        <span className="stat-pill">
+                                            Total marks: <strong>{totalMarks}</strong>
+                                        </span>
+                                    </div>
+                                    <span className="pill pill-gold">
+                                        {sessionStorage.getItem("examTitle") || "Examination Paper"}
+                                    </span>
+                                </div>
+
+                                {questions.map((question, index) => (
+                                    <article className="question-card" key={question.question_id || index}>
+                                        <div className="question-card-top">
+                                            <h2>Question {index + 1}</h2>
+                                            <div className="badge-group">
+                                                <span className={getTypePillClass(question.type)}>
+                                                    {formatTypeLabel(question.type)}
+                                                </span>
+                                                <span className="pill pill-indigo">
+                                                    {question.bloomLevel}
+                                                </span>
+                                                <span className="pill pill-gold">1 mark</span>
+                                            </div>
+                                        </div>
+
+                                        <label>
+                                            Question text
+                                            <textarea
+                                                rows={3}
+                                                value={question.question}
+                                                onChange={e => changeQuestion(index, "question", e.target.value)}
+                                            />
+                                        </label>
+
+                                        {["MCQ", "TRUE_FALSE", "STATEMENT_MCQ"].includes(question.type) && (
+                                            <label>
+                                                Options (one per line)
+                                                <textarea
+                                                    rows={4}
+                                                    value={(question.options || []).join("\n")}
+                                                    onChange={e => changeQuestion(
+                                                        index,
+                                                        "options",
+                                                        e.target.value.split("\n").map(x => x.trim()).filter(Boolean)
+                                                    )}
+                                                />
+                                            </label>
+                                        )}
+
+                                        <div className="form-grid">
+                                            <label>
+                                                Correct answer
+                                                <input
+                                                    value={question.correctAnswer || ""}
+                                                    onChange={e => changeQuestion(index, "correctAnswer", e.target.value)}
+                                                />
+                                            </label>
+                                            <label>
+                                                Bloom level
+                                                <select
+                                                    value={question.bloomLevel}
+                                                    onChange={e => changeQuestion(index, "bloomLevel", e.target.value)}
+                                                >
+                                                    {BLOOM_FIELDS.map(level => <option key={level}>{level}</option>)}
+                                                </select>
+                                            </label>
+                                        </div>
+
+                                        {["FILL_BLANK", "SHORT_ANSWER"].includes(question.type) && (
+                                            <label>
+                                                Accepted answers (comma-separated)
+                                                <input
+                                                    value={(question.acceptedAnswers || []).join(", ")}
+                                                    onChange={e => changeQuestion(
+                                                        index,
+                                                        "acceptedAnswers",
+                                                        e.target.value.split(",").map(x => x.trim()).filter(Boolean)
+                                                    )}
+                                                />
+                                            </label>
+                                        )}
+
+                                        <div className="question-meta-row">
+                                            <div>
+                                                <strong>Concept:</strong> {question.concept || "Not specified"}
+                                            </div>
+                                            <div>
+                                                <strong>Source:</strong>{" "}
+                                                {question.source
+                                                    ? `${(question.source.files || []).join(", ")} · pp. ${(question.source.pages || []).join(", ")}`
+                                                    : "Source metadata unavailable"}
+                                            </div>
+                                        </div>
+
+                                        <div className="retry-box">
+                                            <label>
+                                                Teacher feedback for single-question retry
+                                                <textarea
+                                                    rows={2}
+                                                    value={feedback[question.question_id] || ""}
+                                                    onChange={e => setFeedback(current => ({
+                                                        ...current,
+                                                        [question.question_id]: e.target.value
+                                                    }))}
+                                                    placeholder="Explain what is incorrect or should be improved..."
+                                                />
+                                            </label>
+
+                                            <button
+                                                type="button"
+                                                className="secondary-button"
+                                                disabled={
+                                                    retryingQuestion === question.question_id ||
+                                                    (retryCounts[question.question_id] || 0) >= 2 ||
+                                                    individualRetryTotal >= 10
+                                                }
+                                                onClick={() => retryOne(question)}
+                                            >
+                                                {retryingQuestion === question.question_id
+                                                    ? "Retrying..."
+                                                    : "Retry this question"}
+                                            </button>
+
+                                            {(
+                                                (retryCounts[question.question_id] || 0) > 0 ||
+                                                individualRetryTotal >= 10
+                                            ) && (
+                                                <p className="retry-warning">
+                                                    Limit: 2 retries per question; 10 individual retries per paper.
+                                                    {(retryCounts[question.question_id] || 0) >= 2
+                                                        ? " This question has no retries remaining."
+                                                        : ` ${2 - (retryCounts[question.question_id] || 0)} question retries remaining.`}
+                                                    {individualRetryTotal >= 10
+                                                        ? " The paper has no individual retries remaining."
+                                                        : ""}
+                                                </p>
+                                            )}
+                                        </div>
+                                    </article>
+                                ))}
+
+                                <div className="paper-retry-card">
+                                    <h2>Retry the entire paper</h2>
+                                    <p className="retry-warning">
+                                        You can regenerate the entire paper once using your cached selected material.
+                                    </p>
+                                    <textarea
+                                        rows={3}
+                                        value={paperFeedback}
+                                        onChange={e => setPaperFeedback(e.target.value)}
+                                        placeholder="Optional feedback for the complete paper..."
+                                    />
+                                    <button
+                                        type="button"
+                                        className="secondary-button"
+                                        disabled={paperRetryCount >= 1 || retryingPaper}
+                                        onClick={retryWholePaper}
+                                    >
+                                        {retryingPaper ? "Regenerating paper..." : "Retry entire paper once"}
+                                    </button>
+                                    {paperRetryCount >= 1 && (
+                                        <p className="retry-warning">
+                                            The whole-paper retry limit has been reached. No further paper retries are available.
+                                        </p>
+                                    )}
+                                </div>
+
+                                {error && <div className="error-box" role="alert">{error}</div>}
+                                {notice && !publishedResult && <div className="notice-box">{notice}</div>}
+
+                                {publishedResult && (
+                                    <div className="published-banner">
+                                        <strong>Google Form quiz published and saved</strong>
+                                        <div className="published-banner-links">
+                                            {publishedResult.formUrl && (
+                                                <a
+                                                    href={publishedResult.formUrl}
+                                                    target="_blank"
+                                                    rel="noreferrer"
+                                                >
+                                                    Open Student Form
+                                                </a>
+                                            )}
+                                            {publishedResult.editUrl && (
+                                                <a
+                                                    href={publishedResult.editUrl}
+                                                    target="_blank"
+                                                    rel="noreferrer"
+                                                >
+                                                    Open Form Editor
+                                                </a>
+                                            )}
+                                        </div>
+                                    </div>
+                                )}
+
+                                <div className="publish-action-bar">
+                                    <button
+                                        type="button"
+                                        className="secondary-button"
+                                        onClick={() => navigate("/select-concepts")}
+                                    >
+                                        Back to concept selection
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="primary-button"
+                                        onClick={publish}
+                                        disabled={publishing || !questions.length}
+                                    >
+                                        {publishing ? "Publishing to Google Forms..." : "Publish to Google Forms"}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
                     )}
-                </section>
-
-                {error && <div className="error-box" role="alert">{error}</div>}
-                {notice && <div className="notice-box">{notice}</div>}
-
-                <button className="primary-button" onClick={publish} disabled={publishing || !questions.length}>
-                    {publishing ? "Publishing..." : "Publish to Google Forms"}
-                </button>
-
-                <button className="secondary-button"
-                    onClick={() => navigate("/select-concepts")}>
-                    Back to concept selection
-                </button>
+                </div>
             </main>
         </div>
     );

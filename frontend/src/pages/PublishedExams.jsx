@@ -1,5 +1,5 @@
-
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import Sidebar from "../components/Sidebar";
 
 const readSession = (key, fallback) => {
@@ -45,7 +45,6 @@ function PublishedExams() {
       }
     }
 
-    // Remove duplicate forms using their student URL.
     list = list.filter(
       (exam, index, all) =>
         exam.formUrl &&
@@ -72,15 +71,10 @@ function PublishedExams() {
 
         <div className="content dashboard-home">
           <section className="page-heading">
-            <p className="dashboard-eyebrow">
-              EXAM MANAGEMENT
-            </p>
-
+            <p className="dashboard-eyebrow">Exam Management</p>
             <h1>Published exams</h1>
-
             <p>
-              Open the student form, edit the Google Form, or
-              check its publication details.
+              Open the student form, edit the Google Form, or review publication details.
             </p>
           </section>
 
@@ -89,37 +83,56 @@ function PublishedExams() {
               <div>
                 <h2>Your Google Forms</h2>
                 <p>
-                  {exams.length} saved{" "}
-                  {exams.length === 1 ? "exam" : "exams"}
+                  {exams.length} saved {exams.length === 1 ? "exam" : "exams"}
                 </p>
               </div>
             </div>
 
             {exams.length === 0 ? (
               <div className="dashboard-empty">
-                <div className="dashboard-empty-icon">▣</div>
+                <div className="dashboard-empty-icon" aria-hidden="true">
+                  <svg
+                    width="20"
+                    height="20"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.75"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                    <polyline points="14 2 14 8 20 8" />
+                  </svg>
+                </div>
                 <h3>No published exams yet</h3>
                 <p>
-                  After you publish an exam, its student and
-                  editor links will appear here.
+                  After you publish an exam, its student and editor links will appear here.
                 </p>
-
-                <a
-                  href="/generate-questions"
-                  className="dashboard-primary-button"
-                >
+                <Link to="/generate-questions" className="dashboard-primary-button">
                   Generate questions
-                </a>
+                </Link>
               </div>
             ) : (
               <div className="published-exam-list">
                 {exams.map((exam, index) => (
-                  <article
-                    className="published-exam-card"
-                    key={exam.formUrl}
-                  >
+                  <article className="published-exam-card" key={exam.formUrl}>
                     <div className="published-exam-heading">
-                      <div className="published-exam-icon">▤</div>
+                      <div className="published-exam-icon" aria-hidden="true">
+                        <svg
+                          width="19"
+                          height="19"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.75"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                          <polyline points="14 2 14 8 20 8" />
+                        </svg>
+                      </div>
 
                       <div className="published-exam-title">
                         <h3>
@@ -130,16 +143,12 @@ function PublishedExams() {
 
                         <p>
                           {exam.publishedAt
-                            ? `Published ${new Date(
-                                exam.publishedAt
-                              ).toLocaleString()}`
+                            ? `Published ${new Date(exam.publishedAt).toLocaleString()}`
                             : "Google Form"}
                         </p>
                       </div>
 
-                      <span className="published-status">
-                        Published
-                      </span>
+                      <span className="published-status">Published</span>
                     </div>
 
                     <div className="published-exam-links">
@@ -151,29 +160,18 @@ function PublishedExams() {
                             : "Student link not available."}
                         </p>
                         {exam.formUrl && (
-                          <a
-                            href={exam.formUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            Open student form ↗
+                          <a href={exam.formUrl} target="_blank" rel="noreferrer">
+                            Open student form
                           </a>
                         )}
                       </div>
 
                       <div>
                         <span>Teacher link</span>
-                        <p>
-                          Open the form to manage questions and
-                          settings.
-                        </p>
+                        <p>Open the form to manage questions and settings.</p>
                         {exam.editUrl && (
-                          <a
-                            href={exam.editUrl}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            Open form editor ↗
+                          <a href={exam.editUrl} target="_blank" rel="noreferrer">
+                            Open form editor
                           </a>
                         )}
                       </div>
@@ -181,16 +179,14 @@ function PublishedExams() {
 
                     {exam.expiryDate && (
                       <p className="published-expiry">
-                        Close date saved:{" "}
-                        {new Date(exam.expiryDate).toLocaleString()}
+                        Close date saved: {new Date(exam.expiryDate).toLocaleString()}
                       </p>
                     )}
 
                     {!exam.editUrl && (
                       <p className="published-note">
-                        The editor URL was not returned for this
-                        form. Use the student link only until the
-                        editor link is available.
+                        The editor URL was not returned for this form. Use the student link
+                        only until the editor link is available.
                       </p>
                     )}
                   </article>
@@ -200,8 +196,7 @@ function PublishedExams() {
           </section>
 
           <p className="published-footnote">
-            These links are stored in this browser session. They
-            are not yet saved permanently to your database.
+            These links are stored in this browser session.
           </p>
         </div>
       </main>
